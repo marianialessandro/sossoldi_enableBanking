@@ -18,6 +18,13 @@ class BankAccountFields extends BaseEntityFields {
   static String updatedAt = BaseEntityFields.getUpdatedAt;
   static String deletedAt = BaseEntityFields.getDeletedAt;
 
+  // Enable Banking sync (added in migration 0008, wired into the model and
+  // repository in a later step).
+  static String ebAccountUid = 'ebAccountUid';
+  static String ebConnectionId = 'ebConnectionId';
+  static String iban = 'iban';
+  static String lastSyncAt = 'lastSyncAt';
+
   static final List<String> allFields = [
     BaseEntityFields.id,
     name,

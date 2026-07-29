@@ -26,6 +26,10 @@ class TransactionFields extends BaseEntityFields {
   static String createdAt = BaseEntityFields.getCreatedAt;
   static String updatedAt = BaseEntityFields.getUpdatedAt;
 
+  // Enable Banking sync (added in migration 0008, wired into the model and
+  // repository in a later step).
+  static String externalId = 'externalId';
+
   static final List<String> allFields = [
     BaseEntityFields.id,
     date,

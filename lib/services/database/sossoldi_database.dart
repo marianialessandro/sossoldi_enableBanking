@@ -10,6 +10,7 @@ import 'package:sqflite/sqflite.dart';
 
 // Models
 import '../../model/bank_account.dart';
+import '../../model/bank_connection.dart';
 import '../../model/budget.dart';
 import '../../model/category_transaction.dart';
 import '../../model/currency.dart';
@@ -377,6 +378,7 @@ class SossoldiDatabase {
         batch.execute('DROP TABLE IF EXISTS $categoryTransactionTable');
         batch.execute('DROP TABLE IF EXISTS $budgetTable');
         batch.execute('DROP TABLE IF EXISTS $currencyTable');
+        batch.execute('DROP TABLE IF EXISTS $bankConnectionTable');
         await batch.commit();
       });
     } catch (error) {
@@ -395,6 +397,7 @@ class SossoldiDatabase {
         batch.delete(categoryTransactionTable);
         batch.delete(budgetTable);
         batch.delete(currencyTable);
+        batch.delete(bankConnectionTable);
         await batch.commit();
       });
     } catch (error) {
