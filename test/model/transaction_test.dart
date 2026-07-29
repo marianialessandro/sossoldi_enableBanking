@@ -596,5 +596,55 @@ void main() {
       expect(result[1]['income'], 700);
       expect(result[1]['expense'], 300);
     });
+
+    test("selectExternalIds only returns non-null external ids", () async {
+      await sossoldiDatabase.fillDemoData(countOfGeneratedTransaction: 50);
+      final repo = TransactionsRepository(database: sossoldiDatabase);
+
+      await repo.insert(
+        Transaction(
+          date: DateTime.now(),
+          amount: 10,
+          type: TransactionType.expense,
+          idBankAccount: 70,
+          recurring: false,
+          externalId: 'ext-1',
+        ),
+      );
+      await repo.insert(
+        Transaction(
+          date: DateTime.now(),
+          amount: 20,
+          type: TransactionType.expense,
+          idBankAccount: 70,
+          recurring: false,
+        ),
+      );
+
+      expect(await repo.selectExternalIds(70), {'ext-1'});
+    });
+
+    test(
+      "insertMissing is idempotent per (idBankAccount, externalId)",
+      () async {
+        await sossoldiDatabase.fillDemoData(countOfGeneratedTransaction: 50);
+        final repo = TransactionsRepository(database: sossoldiDatabase);
+
+        final tx = Transaction(
+          date: DateTime.now(),
+          amount: 12.5,
+          type: TransactionType.expense,
+          idBankAccount: 70,
+          recurring: false,
+          externalId: 'ext-dup',
+        );
+
+        expect(await repo.insertMissing([tx, tx]), 1);
+        expect(await repo.insertMissing([tx]), 0);
+
+        final all = await repo.selectAll();
+        expect(all.where((t) => t.externalId == 'ext-dup').length, 1);
+      },
+    );
   });
 }

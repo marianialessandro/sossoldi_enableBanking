@@ -430,5 +430,44 @@ void main() {
       );
       expect(result[2]['balance'] - initialAccountAmount, -449.5);
     });
+
+    test("selectByEbUid / selectLinked / updateLastSync / unlink", () async {
+      await sossoldiDatabase.fillDemoData(countOfGeneratedTransaction: 50);
+      final repo = AccountRepository(database: sossoldiDatabase);
+
+      expect(await repo.selectByEbUid('eb-uid-70'), isNull);
+      expect(await repo.selectLinked(), isEmpty);
+
+      await db.update(
+        bankAccountTable,
+        {
+          BankAccountFields.ebAccountUid: 'eb-uid-70',
+          BankAccountFields.ebConnectionId: 1,
+          BankAccountFields.iban: 'IT60X0542811101000000123456',
+        },
+        where: '${BankAccountFields.id} = ?',
+        whereArgs: [70],
+      );
+
+      final linkedByUid = await repo.selectByEbUid('eb-uid-70');
+      expect(linkedByUid, isNotNull);
+      expect(linkedByUid!.id, 70);
+      expect(linkedByUid.iban, 'IT60X0542811101000000123456');
+
+      final linked = await repo.selectLinked();
+      expect(linked.map((a) => a.id), [70]);
+
+      final syncTime = DateTime.utc(2026, 1, 15, 10);
+      await repo.updateLastSync(70, syncTime);
+      expect((await repo.selectById(70)).lastSyncAt, syncTime);
+
+      await repo.unlink(70);
+      final afterUnlink = await repo.selectById(70);
+      expect(afterUnlink.ebAccountUid, isNull);
+      expect(afterUnlink.ebConnectionId, isNull);
+      expect(afterUnlink.iban, isNull);
+      expect(afterUnlink.lastSyncAt, isNull);
+      expect(await repo.selectLinked(), isEmpty);
+    });
   });
 }

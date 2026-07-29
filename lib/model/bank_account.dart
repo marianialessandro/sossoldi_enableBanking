@@ -18,8 +18,7 @@ class BankAccountFields extends BaseEntityFields {
   static String updatedAt = BaseEntityFields.getUpdatedAt;
   static String deletedAt = BaseEntityFields.getDeletedAt;
 
-  // Enable Banking sync (added in migration 0008, wired into the model and
-  // repository in a later step).
+  // Enable Banking sync: NULL for manual accounts.
   static String ebAccountUid = 'ebAccountUid';
   static String ebConnectionId = 'ebConnectionId';
   static String iban = 'iban';
@@ -38,10 +37,18 @@ class BankAccountFields extends BaseEntityFields {
     BaseEntityFields.createdAt,
     BaseEntityFields.updatedAt,
     BaseEntityFields.deletedAt,
+    ebAccountUid,
+    ebConnectionId,
+    iban,
+    lastSyncAt,
   ];
 }
 
 class BankAccount extends BaseEntity {
+  // Sentinel distinguishing "not passed" from "explicitly set to null" for
+  // the nullable bank-sync fields below, so copy() can clear them.
+  static const _unset = Object();
+
   final String name;
   final String symbol;
   final int color;
@@ -51,6 +58,10 @@ class BankAccount extends BaseEntity {
   final bool mainAccount;
   final int order;
   final num? total;
+  final String? ebAccountUid;
+  final int? ebConnectionId;
+  final String? iban;
+  final DateTime? lastSyncAt;
 
   const BankAccount({
     super.id,
@@ -63,6 +74,10 @@ class BankAccount extends BaseEntity {
     required this.mainAccount,
     required this.order,
     this.total,
+    this.ebAccountUid,
+    this.ebConnectionId,
+    this.iban,
+    this.lastSyncAt,
     super.createdAt,
     super.updatedAt,
     super.deletedAt,
@@ -78,6 +93,10 @@ class BankAccount extends BaseEntity {
     bool? countNetWorth,
     bool? mainAccount,
     int? order,
+    Object? ebAccountUid = _unset,
+    Object? ebConnectionId = _unset,
+    Object? iban = _unset,
+    Object? lastSyncAt = _unset,
     DateTime? createdAt,
     DateTime? updatedAt,
     DateTime? deletedAt,
@@ -91,6 +110,16 @@ class BankAccount extends BaseEntity {
     countNetWorth: countNetWorth ?? this.countNetWorth,
     mainAccount: mainAccount ?? this.mainAccount,
     order: order ?? this.order,
+    ebAccountUid: ebAccountUid == _unset
+        ? this.ebAccountUid
+        : (ebAccountUid as String?),
+    ebConnectionId: ebConnectionId == _unset
+        ? this.ebConnectionId
+        : (ebConnectionId as int?),
+    iban: iban == _unset ? this.iban : (iban as String?),
+    lastSyncAt: lastSyncAt == _unset
+        ? this.lastSyncAt
+        : (lastSyncAt as DateTime?),
     createdAt: createdAt ?? this.createdAt,
     updatedAt: updatedAt ?? this.updatedAt,
     deletedAt: deletedAt ?? this.deletedAt,
@@ -108,6 +137,12 @@ class BankAccount extends BaseEntity {
     mainAccount: json[BankAccountFields.mainAccount] == 1 ? true : false,
     order: json[BankAccountFields.order] as int,
     total: json[BankAccountFields.total] as num?,
+    ebAccountUid: json[BankAccountFields.ebAccountUid] as String?,
+    ebConnectionId: json[BankAccountFields.ebConnectionId] as int?,
+    iban: json[BankAccountFields.iban] as String?,
+    lastSyncAt: json[BankAccountFields.lastSyncAt] != null
+        ? DateTime.parse(json[BankAccountFields.lastSyncAt] as String)
+        : null,
     createdAt: DateTime.parse(json[BaseEntityFields.createdAt] as String),
     updatedAt: DateTime.parse(json[BaseEntityFields.updatedAt] as String),
     deletedAt: json[BaseEntityFields.deletedAt] != null
@@ -125,6 +160,10 @@ class BankAccount extends BaseEntity {
     BankAccountFields.countNetWorth: countNetWorth && !delete ? 1 : 0,
     BankAccountFields.mainAccount: mainAccount && !delete ? 1 : 0,
     BankAccountFields.order: delete ? 0 : order,
+    BankAccountFields.ebAccountUid: ebAccountUid,
+    BankAccountFields.ebConnectionId: ebConnectionId,
+    BankAccountFields.iban: iban,
+    BankAccountFields.lastSyncAt: lastSyncAt?.toUtc().toIso8601String(),
     BaseEntityFields.createdAt: update || delete
         ? createdAt?.toIso8601String()
         : DateTime.now().toIso8601String(),

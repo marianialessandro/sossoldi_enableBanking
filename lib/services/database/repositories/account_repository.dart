@@ -207,6 +207,66 @@ class AccountRepository {
     }
   }
 
+  Future<BankAccount?> selectByEbUid(String uid) async {
+    final db = await _sossoldiDB.database;
+
+    final maps = await db.query(
+      bankAccountTable,
+      columns: BankAccountFields.allFields,
+      where: '${BankAccountFields.ebAccountUid} = ?',
+      whereArgs: [uid],
+    );
+
+    return maps.isNotEmpty ? BankAccount.fromJson(maps.first) : null;
+  }
+
+  /// Accounts still linked to Enable Banking and eligible for sync: a
+  /// deactivated or soft-deleted account keeps its `ebAccountUid` around but
+  /// must not be synced any more.
+  Future<List<BankAccount>> selectLinked() async {
+    final db = await _sossoldiDB.database;
+
+    final maps = await db.query(
+      bankAccountTable,
+      columns: BankAccountFields.allFields,
+      where:
+          '${BankAccountFields.ebAccountUid} IS NOT NULL'
+          ' AND ${BankAccountFields.active} = 1'
+          ' AND ${BankAccountFields.deletedAt} IS NULL',
+    );
+
+    return maps.map((json) => BankAccount.fromJson(json)).toList();
+  }
+
+  Future<void> updateLastSync(int accountId, DateTime when) async {
+    final db = await _sossoldiDB.database;
+
+    await db.update(
+      bankAccountTable,
+      {BankAccountFields.lastSyncAt: when.toUtc().toIso8601String()},
+      where: '${BankAccountFields.id} = ?',
+      whereArgs: [accountId],
+    );
+  }
+
+  /// Turns a linked account back into a manual one; the account and its
+  /// transaction history are kept, only the Enable Banking link is dropped.
+  Future<void> unlink(int accountId) async {
+    final db = await _sossoldiDB.database;
+
+    await db.update(
+      bankAccountTable,
+      {
+        BankAccountFields.ebAccountUid: null,
+        BankAccountFields.ebConnectionId: null,
+        BankAccountFields.iban: null,
+        BankAccountFields.lastSyncAt: null,
+      },
+      where: '${BankAccountFields.id} = ?',
+      whereArgs: [accountId],
+    );
+  }
+
   Future<int> deactivateById(int id) async {
     final db = await _sossoldiDB.database;
 

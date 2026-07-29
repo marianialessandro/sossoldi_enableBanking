@@ -26,8 +26,7 @@ class TransactionFields extends BaseEntityFields {
   static String createdAt = BaseEntityFields.getCreatedAt;
   static String updatedAt = BaseEntityFields.getUpdatedAt;
 
-  // Enable Banking sync (added in migration 0008, wired into the model and
-  // repository in a later step).
+  // Enable Banking sync: NULL for manually-entered transactions.
   static String externalId = 'externalId';
 
   static final List<String> allFields = [
@@ -43,6 +42,7 @@ class TransactionFields extends BaseEntityFields {
     idRecurringTransaction,
     BaseEntityFields.createdAt,
     BaseEntityFields.updatedAt,
+    externalId,
   ];
 }
 
@@ -107,6 +107,7 @@ class Transaction extends BaseEntity {
   final String? bankAccountTransferName;
   final bool recurring;
   final int? idRecurringTransaction;
+  final String? externalId;
 
   const Transaction({
     super.id,
@@ -125,6 +126,7 @@ class Transaction extends BaseEntity {
     this.bankAccountTransferName,
     required this.recurring,
     this.idRecurringTransaction,
+    this.externalId,
     super.createdAt,
     super.updatedAt,
   });
@@ -140,6 +142,7 @@ class Transaction extends BaseEntity {
     int? idBankAccountTransfer,
     bool? recurring,
     int? idRecurringTransaction,
+    String? externalId,
     DateTime? createdAt,
     DateTime? updatedAt,
   }) => Transaction(
@@ -154,6 +157,7 @@ class Transaction extends BaseEntity {
     recurring: recurring ?? this.recurring,
     idRecurringTransaction:
         idRecurringTransaction ?? this.idRecurringTransaction,
+    externalId: externalId ?? this.externalId,
     createdAt: createdAt ?? this.createdAt,
     updatedAt: updatedAt ?? this.updatedAt,
   );
@@ -179,6 +183,7 @@ class Transaction extends BaseEntity {
       recurring: json[TransactionFields.recurring] == 1,
       idRecurringTransaction:
           json[TransactionFields.idRecurringTransaction] as int?,
+      externalId: json[TransactionFields.externalId] as String?,
       createdAt: DateTime.parse(json[BaseEntityFields.createdAt] as String),
       updatedAt: DateTime.parse(json[BaseEntityFields.updatedAt] as String),
     );
@@ -200,6 +205,7 @@ class Transaction extends BaseEntity {
       TransactionFields.idBankAccountTransfer: idBankAccountTransfer,
       TransactionFields.recurring: recurring ? 1 : 0,
       TransactionFields.idRecurringTransaction: idRecurringTransaction,
+      TransactionFields.externalId: externalId,
       BaseEntityFields.createdAt: createdAtDate,
       BaseEntityFields.updatedAt: DateTime.now().toIso8601String(),
     };

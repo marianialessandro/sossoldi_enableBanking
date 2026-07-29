@@ -247,6 +247,56 @@ class TransactionsRepository {
     return result;
   }
 
+  Future<Set<String>> selectExternalIds(int accountId) async {
+    final db = await _sossoldiDB.database;
+
+    final maps = await db.query(
+      transactionTable,
+      columns: [TransactionFields.externalId],
+      where:
+          '${TransactionFields.idBankAccount} = ? AND '
+          '${TransactionFields.externalId} IS NOT NULL',
+      whereArgs: [accountId],
+    );
+
+    return maps
+        .map((json) => json[TransactionFields.externalId] as String)
+        .toSet();
+  }
+
+  /// Inserts [items], skipping any whose `(idBankAccount, externalId)` pair
+  /// already exists, so re-syncing the same bank transactions is idempotent.
+  /// Returns the number of transactions actually inserted.
+  Future<int> insertMissing(List<Transaction> items) async {
+    if (items.isEmpty) return 0;
+
+    final db = await _sossoldiDB.database;
+    var insertedCount = 0;
+
+    await db.transaction((txn) async {
+      for (final item in items) {
+        final externalId = item.externalId;
+        if (externalId != null) {
+          final existing = await txn.query(
+            transactionTable,
+            columns: [TransactionFields.id],
+            where:
+                '${TransactionFields.idBankAccount} = ? AND '
+                '${TransactionFields.externalId} = ?',
+            whereArgs: [item.idBankAccount, externalId],
+            limit: 1,
+          );
+          if (existing.isNotEmpty) continue;
+        }
+
+        await txn.insert(transactionTable, item.toJson());
+        insertedCount++;
+      }
+    });
+
+    return insertedCount;
+  }
+
   Future<int> updateItem(Transaction item) async {
     final db = await _sossoldiDB.database;
 
