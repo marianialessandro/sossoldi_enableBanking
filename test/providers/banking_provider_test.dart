@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -10,6 +11,7 @@ import 'package:sossoldi/providers/banking_provider.dart';
 import 'package:sossoldi/services/banking/enable_banking_api.dart';
 import 'package:sossoldi/services/banking/enable_banking_auth.dart';
 import 'package:sossoldi/services/banking/enable_banking_credentials_store.dart';
+import 'package:sossoldi/services/banking/enable_banking_deeplink_service.dart';
 import 'package:sossoldi/services/banking/models/aspsp.dart';
 import 'package:sossoldi/services/database/repositories/account_repository.dart';
 import 'package:sossoldi/services/database/repositories/bank_connection_repository.dart';
@@ -88,6 +90,18 @@ class _FakeAccountRepository extends AccountRepository {
   }
 }
 
+/// Feeds deep links to [EnableBankingDeeplinkService] without going through
+/// the `app_links` platform channel.
+class _FakeUriLinkSource implements UriLinkSource {
+  final StreamController<Uri> controller = StreamController<Uri>.broadcast();
+
+  @override
+  Stream<Uri> get uriStream => controller.stream;
+
+  @override
+  Future<Uri?> getInitialUri() async => null;
+}
+
 http.Response _json(Object body, {int statusCode = 200}) => http.Response(
   jsonEncode(body),
   statusCode,
@@ -115,11 +129,13 @@ Map<String, dynamic> _sessionJson({
 void main() {
   late _FakeBankConnectionRepository connectionRepository;
   late _FakeAccountRepository accountRepository;
+  late _FakeUriLinkSource linkSource;
   late ProviderContainer container;
 
   ProviderContainer buildContainer(MockClientHandler handler) {
     connectionRepository = _FakeBankConnectionRepository();
     accountRepository = _FakeAccountRepository();
+    linkSource = _FakeUriLinkSource();
 
     return ProviderContainer(
       overrides: [
@@ -134,11 +150,17 @@ void main() {
           connectionRepository,
         ),
         accountRepositoryProvider.overrideWithValue(accountRepository),
+        enableBankingDeeplinkServiceProvider.overrideWithValue(
+          EnableBankingDeeplinkService(source: linkSource),
+        ),
       ],
     );
   }
 
-  tearDown(() => container.dispose());
+  tearDown(() {
+    container.dispose();
+    linkSource.controller.close();
+  });
 
   group('ConnectBankFlow', () {
     test(
@@ -340,6 +362,100 @@ void main() {
       );
       expect(unlinked.ebAccountUid, isNull);
       expect(unlinked.ebConnectionId, isNull);
+    });
+  });
+
+  group('BankCallbackHandler', () {
+    Map<String, dynamic> authJson() => {
+      'url': 'https://bank.example/consent',
+      'authorization_id': 'auth-1',
+      'psu_id_hash': 'hash',
+    };
+
+    Future<String> startFlow() async {
+      // Reading the handler starts the deep link listener.
+      container.read(bankCallbackHandlerProvider);
+      await container
+          .read(connectBankFlowProvider.notifier)
+          .startConnection(const Aspsp(name: 'Test Bank', country: 'IT'));
+      return container.read(connectBankFlowProvider).csrfState!;
+    }
+
+    test('a callback deep link completes the connection', () async {
+      container = buildContainer((request) async {
+        if (request.url.path == '/auth') return _json(authJson());
+        expect(request.url.path, '/sessions');
+        expect(jsonDecode(request.body), {'code': 'auth-code'});
+        return _json(_sessionJson());
+      });
+
+      final csrfState = await startFlow();
+      linkSource.controller.add(
+        Uri.parse('sossoldi://eb-callback?code=auth-code&state=$csrfState'),
+      );
+      await pumpEventQueue();
+
+      final state = container.read(bankCallbackHandlerProvider);
+      expect(state.errorMessage, isNull);
+      expect(state.processing, isFalse);
+      expect(state.connectionId, connectionRepository.connections.single.id);
+    });
+
+    test('a refused authorization reports the error', () async {
+      container = buildContainer((request) async {
+        if (request.url.path == '/auth') return _json(authJson());
+        fail('must not call /sessions when the user refused consent');
+      });
+
+      await startFlow();
+      linkSource.controller.add(
+        Uri.parse(
+          'sossoldi://eb-callback?error=access_denied'
+          '&error_description=User+refused',
+        ),
+      );
+      await pumpEventQueue();
+
+      expect(
+        container.read(bankCallbackHandlerProvider).errorMessage,
+        'User refused',
+      );
+      expect(connectionRepository.connections, isEmpty);
+    });
+
+    test('a callback with a mismatched state creates no session', () async {
+      container = buildContainer((request) async {
+        if (request.url.path == '/auth') return _json(authJson());
+        fail('must not call /sessions when the CSRF state is invalid');
+      });
+
+      await startFlow();
+      linkSource.controller.add(
+        Uri.parse('sossoldi://eb-callback?code=auth-code&state=forged'),
+      );
+      await pumpEventQueue();
+
+      expect(
+        container.read(bankCallbackHandlerProvider).errorMessage,
+        isNotNull,
+      );
+      expect(connectionRepository.connections, isEmpty);
+    });
+
+    test('a callback without a flow in progress is reported', () async {
+      container = buildContainer((_) async => fail('no request expected'));
+
+      container.read(bankCallbackHandlerProvider);
+      linkSource.controller.add(
+        Uri.parse('sossoldi://eb-callback?code=auth-code&state=csrf'),
+      );
+      await pumpEventQueue();
+
+      expect(
+        container.read(bankCallbackHandlerProvider).errorMessage,
+        'No bank connection in progress, please start again',
+      );
+      expect(connectionRepository.connections, isEmpty);
     });
   });
 }

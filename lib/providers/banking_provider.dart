@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
@@ -9,6 +10,7 @@ import '../services/banking/enable_banking_api.dart';
 import '../services/banking/enable_banking_auth.dart';
 import '../services/banking/enable_banking_config.dart';
 import '../services/banking/enable_banking_credentials_store.dart';
+import '../services/banking/enable_banking_deeplink_service.dart';
 import '../services/banking/enable_banking_exception.dart';
 import '../services/banking/models/aspsp.dart';
 import '../services/banking/models/eb_account.dart';
@@ -56,6 +58,21 @@ class BankAccountImportSelection {
     required this.symbol,
     required this.color,
     this.startingValue = 0,
+  });
+}
+
+/// Outcome of the last OAuth callback handled by [BankCallbackHandler]:
+/// watched by the UI to report failures and to move on to the account
+/// import screen once [connectionId] is set.
+class BankCallbackState {
+  final bool processing;
+  final String? errorMessage;
+  final int? connectionId;
+
+  const BankCallbackState({
+    this.processing = false,
+    this.errorMessage,
+    this.connectionId,
   });
 }
 
@@ -150,6 +167,67 @@ class EnableBankingSettings extends _$EnableBankingSettings {
       return null;
     });
   }
+}
+
+@Riverpod(keepAlive: true)
+EnableBankingDeeplinkService enableBankingDeeplinkService(Ref ref) {
+  final service = EnableBankingDeeplinkService();
+  ref.onDispose(service.dispose);
+  return service;
+}
+
+/// Listens for the `sossoldi://eb-callback` deep link and feeds it to
+/// [ConnectBankFlow]. Kept alive for the whole app session because the
+/// callback can land at any time, including on a cold start.
+@Riverpod(keepAlive: true)
+class BankCallbackHandler extends _$BankCallbackHandler {
+  @override
+  BankCallbackState build() {
+    // The wizard is autoDispose, but the CSRF state it generates has to
+    // survive the round trip to the bank's consent page in an external
+    // browser: hold a listener on it for as long as callbacks can arrive.
+    ref.listen(connectBankFlowProvider, (previous, next) {});
+    unawaited(ref.read(enableBankingDeeplinkServiceProvider).start(handle));
+    return const BankCallbackState();
+  }
+
+  /// Routes one callback: refusals and errors surface as
+  /// [BankCallbackState.errorMessage], a valid `code` completes the flow.
+  Future<void> handle(EnableBankingCallback callback) async {
+    if (!callback.isSuccess) {
+      state = BankCallbackState(errorMessage: callback.errorMessage);
+      return;
+    }
+
+    if (ref.read(connectBankFlowProvider).csrfState == null) {
+      state = const BankCallbackState(
+        errorMessage: 'No bank connection in progress, please start again',
+      );
+      return;
+    }
+
+    state = const BankCallbackState(processing: true);
+    try {
+      await ref
+          .read(connectBankFlowProvider.notifier)
+          .completeConnection(
+            code: callback.code!,
+            returnedState: callback.state ?? '',
+          );
+      state = BankCallbackState(
+        connectionId: ref.read(connectBankFlowProvider).connectionId,
+      );
+    } on ConnectBankFlowException catch (e) {
+      state = BankCallbackState(errorMessage: e.message);
+    } on EnableBankingException catch (e) {
+      state = BankCallbackState(
+        errorMessage: e.message ?? 'Could not connect to the bank',
+      );
+    }
+  }
+
+  /// Clears the last outcome once the UI has consumed it.
+  void reset() => state = const BankCallbackState();
 }
 
 @Riverpod(keepAlive: true)

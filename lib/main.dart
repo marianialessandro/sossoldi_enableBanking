@@ -8,12 +8,14 @@ import 'package:timezone/data/latest.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
 import 'package:flutter_phoenix/flutter_phoenix.dart';
 
+import 'providers/banking_provider.dart';
 import 'providers/settings_provider.dart';
 import 'providers/theme_provider.dart';
 import 'routes/routes.dart';
 import 'services/database/repositories/recurring_transactions_repository.dart';
 import 'services/database/sossoldi_database.dart';
 import 'services/notifications/notifications_service.dart';
+import 'ui/snack_bars/snack_bar.dart';
 import 'ui/theme/app_theme.dart';
 
 void main() async {
@@ -103,8 +105,20 @@ class Launcher extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final appThemeState = ref.watch(appThemeStateProvider);
     final bool isOnboardingCompleted = ref.watch(onBoardingCompletedProvider);
+
+    // Starts capturing the Enable Banking OAuth callback deep link (cold
+    // start included) and reports authorization failures wherever the user
+    // is: the connect-bank screens react to the success case themselves.
+    ref.listen(bankCallbackHandlerProvider, (previous, next) {
+      final message = next.errorMessage;
+      if (message != null && message != previous?.errorMessage) {
+        showRootSnackBar(message: message);
+      }
+    });
+
     return MaterialApp(
       title: 'Sossoldi',
+      scaffoldMessengerKey: rootScaffoldMessengerKey,
       theme: AppTheme.lightTheme,
       darkTheme: AppTheme.darkTheme,
       themeMode: appThemeState.isDarkModeEnabled
