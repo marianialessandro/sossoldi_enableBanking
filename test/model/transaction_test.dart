@@ -123,6 +123,57 @@ void main() {
     );
   });
 
+  test("isReconciliation is true only for the reconciliation note", () {
+    final reconciliation = Transaction(
+      date: DateTime.utc(2022),
+      amount: 100,
+      type: TransactionType.income,
+      note: Transaction.reconciliationNote,
+      idBankAccount: 0,
+      recurring: false,
+    );
+    final regular = Transaction(
+      date: DateTime.utc(2022),
+      amount: 100,
+      type: TransactionType.income,
+      note: "Groceries",
+      idBankAccount: 0,
+      recurring: false,
+    );
+    final noNote = Transaction(
+      date: DateTime.utc(2022),
+      amount: 100,
+      type: TransactionType.income,
+      idBankAccount: 0,
+      recurring: false,
+    );
+
+    expect(reconciliation.isReconciliation, isTrue);
+    expect(regular.isReconciliation, isFalse);
+    expect(noNote.isReconciliation, isFalse);
+  });
+
+  test("isBankImported is true only when externalId is set", () {
+    final imported = Transaction(
+      date: DateTime.utc(2022),
+      amount: 100,
+      type: TransactionType.expense,
+      idBankAccount: 0,
+      recurring: false,
+      externalId: 'entry-1',
+    );
+    final manual = Transaction(
+      date: DateTime.utc(2022),
+      amount: 100,
+      type: TransactionType.expense,
+      idBankAccount: 0,
+      recurring: false,
+    );
+
+    expect(imported.isBankImported, isTrue);
+    expect(manual.isBankImported, isFalse);
+  });
+
   test("Test toJson Transaction", () {
     Transaction t = Transaction(
       id: 2,

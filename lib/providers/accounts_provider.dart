@@ -142,9 +142,9 @@ class Accounts extends _$Accounts {
     required BankAccount account,
     required num newBalance,
   }) async {
-    _reconcileAccount(account: account, newBalance: newBalance);
     state = const AsyncLoading();
     state = await AsyncValue.guard(() async {
+      await _reconcileAccount(account: account, newBalance: newBalance);
       return _getAccounts();
     });
   }
@@ -159,7 +159,7 @@ class Accounts extends _$Accounts {
           .read(transactionsProvider.notifier)
           .create(
             difference.abs(),
-            'Reconciliation',
+            Transaction.reconciliationNote,
             account: account,
             type: difference > 0
                 ? TransactionType.income

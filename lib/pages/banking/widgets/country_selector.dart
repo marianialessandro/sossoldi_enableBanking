@@ -77,7 +77,10 @@ class CountrySelector extends StatelessWidget {
                       },
                       leading: Text(
                         country[0],
-                        style: const TextStyle(fontSize: 30),
+                        style: const TextStyle(
+                          fontSize: 30,
+                          fontFamilyFallback: kEmojiFontFallback,
+                        ),
                       ),
                       title: Text(country[1]),
                       trailing: Text(

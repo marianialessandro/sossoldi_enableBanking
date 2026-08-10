@@ -92,6 +92,11 @@ class Transaction extends BaseEntity {
   // This is to allow to manually set a null value to id field.
   static const _unset = Object();
 
+  /// `note` set by `AccountsProvider._reconcileAccount` on the adjustment
+  /// transaction it creates when a manually-entered balance doesn't match
+  /// the ledger.
+  static const String reconciliationNote = 'Reconciliation';
+
   final DateTime date;
   final num amount;
   final TransactionType type;
@@ -108,6 +113,17 @@ class Transaction extends BaseEntity {
   final bool recurring;
   final int? idRecurringTransaction;
   final String? externalId;
+
+  /// A balance-reconciliation adjustment, not a transaction the user
+  /// entered: it has no category, is never recurring, and its
+  /// amount/type/date shouldn't be edited (they're fixed by the balance
+  /// difference at the moment it was created).
+  bool get isReconciliation => note == reconciliationNote;
+
+  /// Synced from the user's bank via Enable Banking rather than entered by
+  /// hand — the account, date and income/expense type shouldn't be edited
+  /// (they're the bank's own record), and it can't be made recurring.
+  bool get isBankImported => externalId != null;
 
   const Transaction({
     super.id,
@@ -142,7 +158,7 @@ class Transaction extends BaseEntity {
     int? idBankAccountTransfer,
     bool? recurring,
     int? idRecurringTransaction,
-    String? externalId,
+    Object? externalId = _unset,
     DateTime? createdAt,
     DateTime? updatedAt,
   }) => Transaction(
@@ -157,7 +173,9 @@ class Transaction extends BaseEntity {
     recurring: recurring ?? this.recurring,
     idRecurringTransaction:
         idRecurringTransaction ?? this.idRecurringTransaction,
-    externalId: externalId ?? this.externalId,
+    externalId: externalId == _unset
+        ? this.externalId
+        : (externalId as String?),
     createdAt: createdAt ?? this.createdAt,
     updatedAt: updatedAt ?? this.updatedAt,
   );

@@ -222,6 +222,10 @@ class TransactionsNotifier extends _$TransactionsNotifier {
     final duplicatedTransaction = transaction.copy(
       id: null,
       note: "${transaction.note} (copy)",
+      // A duplicate is a new manual transaction, not another copy of the
+      // bank record: clear the link or it inherits isBankImported and its
+      // date/account/type/recurring fields get locked on the edit page.
+      externalId: null,
     );
     Transaction? insertedTransaction;
     state = const AsyncLoading();
@@ -278,6 +282,11 @@ class TransactionsNotifier extends _$TransactionsNotifier {
           .read(categoriesProvider)
           .value!
           .firstWhere((element) => element.id == transaction.idCategory!);
+    } else {
+      // Otherwise a category left selected from a previous transaction
+      // would leak onto this one on save (transfers and reconciliation
+      // adjustments have no category of their own).
+      ref.read(selectedCategoryProvider.notifier).state = null;
     }
     ref.read(selectedBankAccountProvider.notifier).state = ref
         .read(accountsProvider)
