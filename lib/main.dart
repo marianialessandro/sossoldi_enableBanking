@@ -109,12 +109,24 @@ class Launcher extends ConsumerWidget {
     // Starts capturing the Enable Banking OAuth callback deep link (cold
     // start included) and reports authorization failures wherever the user
     // is: the connect-bank screens react to the success case themselves.
+    // Resets the provider right after, same as the success path in
+    // connect_bank_page.dart, so a leftover errorMessage doesn't linger
+    // into the next attempt.
     ref.listen(bankCallbackHandlerProvider, (previous, next) {
       final message = next.errorMessage;
       if (message != null && message != previous?.errorMessage) {
         showRootSnackBar(message: message);
+        ref.read(bankCallbackHandlerProvider.notifier).reset();
       }
     });
+
+    // Kicks off the once-a-day background bank sync (if due) through this
+    // same container's ref, so it can invalidate the providers the rest of
+    // the UI already watches once it's done. keepAlive + read (not watch):
+    // this must run once per app session, not on every rebuild, and its
+    // completion is picked up via the providers it invalidates, not by
+    // rebuilding this widget.
+    ref.read(bankAutoSyncProvider);
 
     return MaterialApp(
       title: 'Sossoldi',

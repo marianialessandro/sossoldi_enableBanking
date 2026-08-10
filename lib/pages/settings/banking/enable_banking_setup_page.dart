@@ -6,13 +6,16 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../../constants/style.dart';
 import '../../../providers/banking_provider.dart';
 import '../../../services/banking/enable_banking_auth.dart';
+import '../../../services/banking/enable_banking_certificate_file_picker.dart';
 import '../../../services/banking/enable_banking_config.dart';
 import '../../../services/banking/pem_file_picker.dart';
 import '../../../ui/device.dart';
 import '../../../ui/snack_bars/snack_bar.dart';
 import '../../../ui/widgets/alert_dialog.dart';
+import '../../../ui/widgets/default_card.dart';
 import '../../../ui/widgets/default_container.dart';
 import 'widgets/confirm_clear_credentials_dialog.dart';
+import 'widgets/confirm_regenerate_key_dialog.dart';
 
 /// Where the user registers their own Enable Banking application (BYOC).
 const _kEbApplicationsUrl = 'https://enablebanking.com/cp/applications';
@@ -29,7 +32,12 @@ class _EnableBankingSetupPageState
     extends ConsumerState<EnableBankingSetupPage> {
   final TextEditingController appIdController = TextEditingController();
   final TextEditingController pemController = TextEditingController();
+  final TextEditingController redirectUriController = TextEditingController(
+    text: kEbRedirectUri,
+  );
   bool useSandbox = false;
+  bool hasStoredPrivateKey = false;
+  bool pemVisible = false;
 
   @override
   void initState() {
@@ -41,6 +49,7 @@ class _EnableBankingSetupPageState
   void dispose() {
     appIdController.dispose();
     pemController.dispose();
+    redirectUriController.dispose();
     super.dispose();
   }
 
@@ -49,12 +58,24 @@ class _EnableBankingSetupPageState
   /// form: an empty field means "keep the key already stored".
   Future<void> _loadConfig() async {
     final config = await ref.read(enableBankingSettingsProvider.future);
-    if (!mounted || config == null) return;
+    if (!mounted) return;
 
-    setState(() {
-      appIdController.text = config.appId;
-      useSandbox = config.environment == EnableBankingEnvironment.sandbox;
-    });
+    if (config != null) {
+      setState(() {
+        appIdController.text = config.appId;
+        useSandbox = config.environment == EnableBankingEnvironment.sandbox;
+        redirectUriController.text = config.redirectUri;
+      });
+      return;
+    }
+
+    // No app_id yet, but a key may already have been generated in-app while
+    // waiting for the certificate to be registered on Enable Banking.
+    final storedKey = await ref
+        .read(enableBankingCredentialsStoreProvider)
+        .readPrivateKey();
+    if (!mounted) return;
+    setState(() => hasStoredPrivateKey = storedKey != null);
   }
 
   Future<void> _importPrivateKey() async {
@@ -68,6 +89,98 @@ class _EnableBankingSetupPageState
     } catch (e) {
       if (!mounted) return;
       showSnackBar(context, message: 'Could not read the file: $e');
+    }
+  }
+
+  void _onGeneratePressed() {
+    if (hasStoredPrivateKey) {
+      showDialog(
+        context: context,
+        builder: (context) {
+          return ConfirmRegenerateKeyDialog(
+            onPressed: () {
+              Navigator.of(context).pop();
+              _generateKey();
+            },
+          );
+        },
+      );
+      return;
+    }
+    _generateKey();
+  }
+
+  /// Generates a fresh RSA key pair + self-signed certificate on-device,
+  /// stores the private key immediately (it's never shown/exported), and
+  /// exports the certificate for the user to upload to their Enable
+  /// Banking application.
+  ///
+  /// If credentials were already saved (app_id linked to the previous
+  /// certificate), that config is cleared: the old app_id no longer matches
+  /// the new key, so keeping it around would leave the app silently signing
+  /// requests Enable Banking rejects. The user must re-enter the app_id and
+  /// save again once the new certificate is uploaded. The private key just
+  /// written above is left untouched by this — only the old app_id/config
+  /// are cleared.
+  Future<void> _generateKey() async {
+    final hadCredentials =
+        ref.read(enableBankingSettingsProvider).value != null;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => const AlertDialog(
+        content: Row(
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(width: Sizes.lg),
+            Expanded(
+              child: Text(
+                'Generating your key — this can take up to a minute…',
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    try {
+      final material = await ref
+          .read(enableBankingKeyGeneratorProvider)
+          .generate();
+
+      await ref
+          .read(enableBankingCredentialsStoreProvider)
+          .savePrivateKey(material.privateKeyPem);
+      if (!mounted) return;
+
+      if (hadCredentials) {
+        await ref.read(enableBankingSettingsProvider.notifier).clearConfig();
+        if (!mounted) return;
+      }
+
+      Navigator.of(context).pop(); // dismiss the "generating" dialog
+      setState(() {
+        appIdController.clear();
+        pemController.clear();
+        hasStoredPrivateKey = true;
+      });
+
+      await EnableBankingCertificateFilePicker.saveCertificateFile(
+        material.certificatePem,
+        context,
+      );
+      if (!mounted) return;
+
+      showSuccessDialog(
+        context,
+        'Key generated. Upload the certificate you just saved to your '
+        'Enable Banking application, then paste the app_id below and save.',
+      );
+    } catch (e) {
+      if (!mounted) return;
+      Navigator.of(context).pop(); // dismiss the "generating" dialog
+      showErrorDialog(context, 'Could not generate the key: ${e.toString()}');
     }
   }
 
@@ -103,6 +216,8 @@ class _EnableBankingSetupPageState
       return;
     }
 
+    final redirectUri = redirectUriController.text.trim();
+
     await ref
         .read(enableBankingSettingsProvider.notifier)
         .save(
@@ -113,6 +228,7 @@ class _EnableBankingSetupPageState
             environment: useSandbox
                 ? EnableBankingEnvironment.sandbox
                 : EnableBankingEnvironment.production,
+            redirectUri: redirectUri.isEmpty ? kEbRedirectUri : redirectUri,
           ),
         );
     if (!mounted) return;
@@ -132,7 +248,10 @@ class _EnableBankingSetupPageState
 
     appIdController.clear();
     pemController.clear();
-    setState(() => useSandbox = false);
+    setState(() {
+      useSandbox = false;
+      redirectUriController.text = kEbRedirectUri;
+    });
     showSnackBar(context, message: 'Credentials cleared');
   }
 
@@ -187,7 +306,7 @@ class _EnableBankingSetupPageState
         physics: const BouncingScrollPhysics(),
         child: Column(
           children: [
-            if (hasCredentials)
+            if (hasCredentials) ...[
               Padding(
                 padding: const EdgeInsets.only(bottom: Sizes.sm),
                 child: DefaultContainer(
@@ -198,6 +317,77 @@ class _EnableBankingSetupPageState
                       Expanded(
                         child: Text(
                           "Credentials configured",
+                          style: Theme.of(context).textTheme.bodyLarge,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.only(bottom: Sizes.sm),
+                child: DefaultCard(
+                  onTap: () => Navigator.of(context).pushNamed('/connect-bank'),
+                  child: Row(
+                    children: [
+                      Container(
+                        decoration: const BoxDecoration(
+                          color: blue5,
+                          shape: BoxShape.circle,
+                        ),
+                        padding: const EdgeInsets.all(Sizes.sm),
+                        child: const Icon(
+                          Icons.account_balance,
+                          size: 30.0,
+                          color: white,
+                        ),
+                      ),
+                      const SizedBox(width: Sizes.md),
+                      Expanded(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.spaceAround,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              "Linked banks",
+                              style: Theme.of(context).textTheme.titleLarge!
+                                  .copyWith(
+                                    color: Theme.of(
+                                      context,
+                                    ).colorScheme.primary,
+                                  ),
+                            ),
+                            Text(
+                              "Connect a bank and manage your connections",
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context).textTheme.bodySmall!
+                                  .copyWith(
+                                    color: Theme.of(
+                                      context,
+                                    ).colorScheme.primary,
+                                  ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+            if (!hasCredentials && hasStoredPrivateKey)
+              Padding(
+                padding: const EdgeInsets.only(bottom: Sizes.sm),
+                child: DefaultContainer(
+                  child: Row(
+                    spacing: Sizes.md,
+                    children: [
+                      const Icon(Icons.vpn_key, color: blue5),
+                      Expanded(
+                        child: Text(
+                          "Key generated — upload the certificate to Enable "
+                          "Banking, then enter your app_id below",
                           style: Theme.of(context).textTheme.bodyLarge,
                         ),
                       ),
@@ -251,12 +441,24 @@ class _EnableBankingSetupPageState
                 children: [
                   TextField(
                     controller: pemController,
-                    maxLines: 6,
+                    // Obscured fields can't be multiline, so the key only
+                    // wraps into full multi-line PEM once explicitly
+                    // revealed; hidden by default it's a single obscured
+                    // line, matching "saved encrypted" from the copy above.
+                    obscureText: !pemVisible,
+                    maxLines: pemVisible ? 6 : 1,
                     keyboardType: TextInputType.multiline,
                     decoration: InputDecoration(
                       hintText: hasCredentials
                           ? "•••• configured"
                           : "-----BEGIN PRIVATE KEY-----",
+                      suffixIcon: IconButton(
+                        icon: Icon(
+                          pemVisible ? Icons.visibility_off : Icons.visibility,
+                        ),
+                        onPressed: () =>
+                            setState(() => pemVisible = !pemVisible),
+                      ),
                     ),
                     // A key blob is unreadable at the titleLarge size used by
                     // the other fields.
@@ -275,6 +477,18 @@ class _EnableBankingSetupPageState
                         onPressed: _importPrivateKey,
                       ),
                     ],
+                  ),
+                  const Divider(height: 1, color: grey2),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: Sizes.sm),
+                    child: SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        onPressed: _onGeneratePressed,
+                        icon: const Icon(Icons.auto_fix_high),
+                        label: const Text("Generate new key & certificate"),
+                      ),
+                    ),
                   ),
                 ],
               ),
@@ -312,16 +526,19 @@ class _EnableBankingSetupPageState
                   Row(
                     children: [
                       Expanded(
-                        child: SelectableText(
-                          kEbRedirectUri,
+                        child: TextField(
+                          controller: redirectUriController,
                           style: Theme.of(context).textTheme.titleLarge,
                         ),
                       ),
                       IconButton(
                         icon: const Icon(Icons.copy),
                         onPressed: () async {
+                          final text = redirectUriController.text.trim();
                           await Clipboard.setData(
-                            const ClipboardData(text: kEbRedirectUri),
+                            ClipboardData(
+                              text: text.isEmpty ? kEbRedirectUri : text,
+                            ),
                           );
                           if (context.mounted) {
                             showSnackBar(context, message: "Copied");
@@ -332,7 +549,10 @@ class _EnableBankingSetupPageState
                   ),
                   Text(
                     "Register this URI as redirect URL in your Enable "
-                    "Banking application",
+                    "Banking application. If it rejects the app's own "
+                    "$kEbRedirectUri scheme (common in production), enter "
+                    "an HTTPS URL you control that bounces back to it "
+                    "instead — see the setup guide.",
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
                 ],

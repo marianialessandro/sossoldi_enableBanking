@@ -103,4 +103,13 @@ class EnableBankingCredentialsStore {
     await _storage.delete(key: _kPrivateKeyPemKey);
     await _storage.delete(key: _kConfigJsonKey);
   });
+
+  /// Clears `app_id`/config but leaves the private key untouched. Used when
+  /// regenerating the key pair: the old `app_id` was tied to the previous
+  /// certificate and must not survive, but a private key just written by
+  /// [savePrivateKey] must not be wiped out along with it.
+  Future<void> clearConfig() => _synchronized(() async {
+    await _storage.delete(key: _kAppIdKey);
+    await _storage.delete(key: _kConfigJsonKey);
+  });
 }

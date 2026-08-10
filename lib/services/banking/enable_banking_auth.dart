@@ -95,4 +95,12 @@ class EnableBankingAuth {
     _cachedExpiry = now.add(_tokenTtl);
     return token;
   }
+
+  /// Drops the cached token. Must be called whenever the underlying
+  /// credentials are cleared or regenerated, otherwise a still-valid cached
+  /// token keeps authenticating with credentials the user just revoked.
+  void invalidate() {
+    _cachedToken = null;
+    _cachedExpiry = null;
+  }
 }

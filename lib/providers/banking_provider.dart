@@ -12,12 +12,19 @@ import '../services/banking/enable_banking_config.dart';
 import '../services/banking/enable_banking_credentials_store.dart';
 import '../services/banking/enable_banking_deeplink_service.dart';
 import '../services/banking/enable_banking_exception.dart';
+import '../services/banking/enable_banking_key_generator.dart';
+import '../services/banking/enable_banking_sync_service.dart';
 import '../services/banking/models/aspsp.dart';
 import '../services/banking/models/eb_account.dart';
 import '../services/banking/models/eb_session.dart';
 import '../services/database/repositories/account_repository.dart';
 import '../services/database/repositories/bank_connection_repository.dart';
+import '../services/database/repositories/transactions_repository.dart';
 import 'accounts_provider.dart';
+import 'dashboard_provider.dart';
+import 'settings_provider.dart';
+import 'statistics_provider.dart';
+import 'transactions_provider.dart';
 
 part 'banking_provider.g.dart';
 
@@ -79,6 +86,11 @@ class BankCallbackState {
 /// State of the connect-a-bank wizard (country → ASPSP → consent → import),
 /// held by [ConnectBankFlow]. Not persisted: a fresh flow starts empty.
 class ConnectBankFlowState {
+  // Distinguishes "not passed" from "explicitly cleared to null" for
+  // [reconnecting], so copyWith can null it back out once a reconnect flow
+  // completes (or a brand new, non-reconnect flow starts).
+  static const _unset = Object();
+
   final String? country;
   final List<Aspsp> aspsps;
   final String? csrfState;
@@ -86,6 +98,8 @@ class ConnectBankFlowState {
   final EbSession? session;
   final List<EbAccount> importable;
   final int? connectionId;
+  final BankConnection? connection;
+  final BankConnection? reconnecting;
 
   const ConnectBankFlowState({
     this.country,
@@ -95,6 +109,8 @@ class ConnectBankFlowState {
     this.session,
     this.importable = const [],
     this.connectionId,
+    this.connection,
+    this.reconnecting,
   });
 
   ConnectBankFlowState copyWith({
@@ -105,6 +121,8 @@ class ConnectBankFlowState {
     EbSession? session,
     List<EbAccount>? importable,
     int? connectionId,
+    BankConnection? connection,
+    Object? reconnecting = _unset,
   }) => ConnectBankFlowState(
     country: country ?? this.country,
     aspsps: aspsps ?? this.aspsps,
@@ -113,6 +131,10 @@ class ConnectBankFlowState {
     session: session ?? this.session,
     importable: importable ?? this.importable,
     connectionId: connectionId ?? this.connectionId,
+    connection: connection ?? this.connection,
+    reconnecting: reconnecting == _unset
+        ? this.reconnecting
+        : (reconnecting as BankConnection?),
   );
 }
 
@@ -124,10 +146,71 @@ EnableBankingCredentialsStore enableBankingCredentialsStore(Ref ref) =>
 EnableBankingAuth enableBankingAuth(Ref ref) => EnableBankingAuth();
 
 @Riverpod(keepAlive: true)
+EnableBankingKeyGenerator enableBankingKeyGenerator(Ref ref) =>
+    const EnableBankingKeyGenerator();
+
+@Riverpod(keepAlive: true)
 EnableBankingApi enableBankingApi(Ref ref) => EnableBankingApi(
   auth: ref.watch(enableBankingAuthProvider),
   store: ref.watch(enableBankingCredentialsStoreProvider),
 );
+
+@Riverpod(keepAlive: true)
+EnableBankingSyncService enableBankingSyncService(Ref ref) =>
+    EnableBankingSyncService(
+      api: ref.watch(enableBankingApiProvider),
+      accountRepository: ref.watch(accountRepositoryProvider),
+      transactionsRepository: ref.watch(transactionsRepositoryProvider),
+      bankConnectionRepository: ref.watch(bankConnectionRepositoryProvider),
+    );
+
+const _kLastBankSyncCheckKey = 'last_bank_sync_check';
+
+/// Syncs every actively-linked bank at most once a day; a no-op if the user
+/// hasn't configured Enable Banking credentials or linked any bank yet.
+/// Runs through this same [Ref] (unlike a plain function called from
+/// `main()` against freshly constructed repositories) so that once it's
+/// done it can invalidate [bankConnectionsProvider]/[accountsProvider]/
+/// [transactionsProvider]/[dashboardProvider]/[statisticsProvider] exactly
+/// like [ConnectBankFlow.syncConnection] does — the already-built UI picks
+/// up the new data instead of showing pre-sync state for the rest of the
+/// session.
+@Riverpod(keepAlive: true)
+Future<void> bankAutoSync(Ref ref) async {
+  final prefs = ref.read(sharedPrefProvider);
+  final lastCheckValue = prefs.getString(_kLastBankSyncCheckKey);
+  final lastCheck = lastCheckValue != null
+      ? DateTime.parse(lastCheckValue)
+      : null;
+  if (lastCheck != null && DateTime.now().difference(lastCheck).inDays < 1) {
+    return;
+  }
+
+  final credentialsStore = ref.read(enableBankingCredentialsStoreProvider);
+  if (!await credentialsStore.hasCredentials()) return;
+
+  final bankConnectionRepository = ref.read(bankConnectionRepositoryProvider);
+  if ((await bankConnectionRepository.selectActive()).isEmpty) return;
+
+  try {
+    await ref.read(enableBankingSyncServiceProvider).syncAll();
+  } catch (_) {
+    // Don't mark today as checked: retry on the next app start instead of
+    // waiting a full day because of a transient failure (e.g. no network).
+    return;
+  }
+
+  ref.invalidate(bankConnectionsProvider);
+  ref.invalidate(accountsProvider);
+  ref.invalidate(transactionsProvider);
+  ref.invalidate(dashboardProvider);
+  ref.invalidate(statisticsProvider);
+
+  await prefs.setString(
+    _kLastBankSyncCheckKey,
+    DateTime.now().toIso8601String(),
+  );
+}
 
 @Riverpod(keepAlive: true)
 class EnableBankingSettings extends _$EnableBankingSettings {
@@ -155,6 +238,7 @@ class EnableBankingSettings extends _$EnableBankingSettings {
         privateKeyPem: privateKeyPem,
         config: config,
       );
+      ref.read(enableBankingAuthProvider).invalidate();
       return store.readConfig();
     });
   }
@@ -164,8 +248,48 @@ class EnableBankingSettings extends _$EnableBankingSettings {
     state = await AsyncValue.guard(() async {
       final store = ref.read(enableBankingCredentialsStoreProvider);
       await store.clear();
+      ref.read(enableBankingAuthProvider).invalidate();
       return null;
     });
+  }
+
+  /// Clears the saved `app_id`/config but keeps any private key already in
+  /// the store — used when regenerating the key pair, where the old
+  /// `app_id` no longer matches the freshly generated key but the key
+  /// itself must survive.
+  Future<void> clearConfig() async {
+    state = const AsyncLoading();
+    state = await AsyncValue.guard(() async {
+      final store = ref.read(enableBankingCredentialsStoreProvider);
+      await store.clearConfig();
+      ref.read(enableBankingAuthProvider).invalidate();
+      return null;
+    });
+  }
+}
+
+/// Current balance of an account the user is about to import, best effort:
+/// a failing or missing balance must not block the import — the account
+/// simply starts at zero.
+@riverpod
+Future<num?> ebAccountBalance(Ref ref, String accountUid) async {
+  try {
+    final balances = await ref
+        .read(enableBankingApiProvider)
+        .getBalances(accountUid);
+    if (balances.isEmpty) return null;
+
+    // CLBD (closing booked) is the balance a user recognises as "the money
+    // on the account"; fall back to whatever the bank returned first.
+    final balance = balances.firstWhere(
+      (b) => b.balanceType == 'CLBD',
+      orElse: () => balances.first,
+    );
+    return balance.balanceAmount.amount;
+  } on EnableBankingException {
+    return null;
+  } on EnableBankingAuthException {
+    return null;
   }
 }
 
@@ -223,6 +347,8 @@ class BankCallbackHandler extends _$BankCallbackHandler {
       state = BankCallbackState(
         errorMessage: e.message ?? 'Could not connect to the bank',
       );
+    } on EnableBankingAuthException catch (e) {
+      state = BankCallbackState(errorMessage: e.message);
     }
   }
 
@@ -232,9 +358,17 @@ class BankCallbackHandler extends _$BankCallbackHandler {
 
 @Riverpod(keepAlive: true)
 class BankConnections extends _$BankConnections {
+  /// Everything except `revoked`: once disconnected, a connection should
+  /// disappear from "Linked banks" rather than linger there forever with
+  /// nothing actionable left to do on it.
   @override
-  Future<List<BankConnection>> build() {
-    return ref.watch(bankConnectionRepositoryProvider).selectAll();
+  Future<List<BankConnection>> build() async {
+    final connections = await ref
+        .watch(bankConnectionRepositoryProvider)
+        .selectAll();
+    return connections
+        .where((c) => c.status != BankConnectionStatus.revoked)
+        .toList();
   }
 }
 
@@ -251,19 +385,31 @@ class ConnectBankFlow extends _$ConnectBankFlow {
     final aspsps = await ref
         .read(enableBankingApiProvider)
         .getAspsps(country: country);
-    state = state.copyWith(country: country, aspsps: aspsps);
+    final sorted = [...aspsps]
+      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    state = state.copyWith(country: country, aspsps: sorted);
   }
 
   /// Starts the Enable Banking authorization for [aspsp], stores a fresh
   /// CSRF `state` token in [ConnectBankFlowState.csrfState] and returns the
   /// consent URL to open in an external browser.
-  Future<String> startConnection(Aspsp aspsp) async {
-    state = state.copyWith(authorizing: true);
+  ///
+  /// [reconnecting], when set, marks this as a reconnect of an already
+  /// linked bank whose consent expired: [completeConnection] then updates
+  /// that same [BankConnection] row instead of inserting a new one. Left
+  /// null (the default) for a brand new connection, which also clears any
+  /// stale value a previous reconnect attempt may have left behind.
+  Future<String> startConnection(
+    Aspsp aspsp, {
+    BankConnection? reconnecting,
+  }) async {
+    state = state.copyWith(authorizing: true, reconnecting: reconnecting);
     try {
       final csrfState = _generateCsrfState();
       final maxValidity = aspsp.maximumConsentValidity != null
           ? Duration(seconds: aspsp.maximumConsentValidity!)
           : _kDefaultConsentValidity;
+      final config = await ref.read(enableBankingSettingsProvider.future);
 
       final authorization = await ref
           .read(enableBankingApiProvider)
@@ -272,6 +418,7 @@ class ConnectBankFlow extends _$ConnectBankFlow {
             aspspCountry: aspsp.country,
             state: csrfState,
             validUntil: DateTime.now().toUtc().add(maxValidity),
+            redirectUri: config?.redirectUri ?? kEbRedirectUri,
           );
 
       state = state.copyWith(csrfState: csrfState);
@@ -283,7 +430,10 @@ class ConnectBankFlow extends _$ConnectBankFlow {
 
   /// Completes the OAuth callback: validates [returnedState] against the
   /// CSRF token saved by [startConnection], exchanges [code] for a session
-  /// and persists it as a [BankConnection].
+  /// and persists it as a [BankConnection] — updating the connection being
+  /// reconnected (see [startConnection]) in place if there is one, so a
+  /// renewed consent doesn't leave the old, now-stale row behind as a
+  /// duplicate.
   Future<void> completeConnection({
     required String code,
     required String returnedState,
@@ -297,30 +447,49 @@ class ConnectBankFlow extends _$ConnectBankFlow {
     final session = await ref
         .read(enableBankingApiProvider)
         .createSession(code);
-    final connection = await ref
-        .read(bankConnectionRepositoryProvider)
-        .insert(
-          BankConnection(
-            aspspName: session.aspspName,
-            aspspCountry: session.aspspCountry,
-            sessionId: session.sessionId,
-            validUntil: session.validUntil,
-            status: BankConnectionStatus.active,
-            psuType: session.psuType,
-          ),
-        );
+    final bankConnectionRepository = ref.read(bankConnectionRepositoryProvider);
+
+    final reconnecting = state.reconnecting;
+    final BankConnection connection;
+    if (reconnecting != null) {
+      connection = reconnecting.copy(
+        sessionId: session.sessionId,
+        validUntil: session.validUntil,
+        status: BankConnectionStatus.active,
+        psuType: session.psuType,
+      );
+      await bankConnectionRepository.updateItem(connection);
+    } else {
+      connection = await bankConnectionRepository.insert(
+        BankConnection(
+          aspspName: session.aspspName,
+          aspspCountry: session.aspspCountry,
+          sessionId: session.sessionId,
+          validUntil: session.validUntil,
+          status: BankConnectionStatus.active,
+          psuType: session.psuType,
+        ),
+      );
+    }
     ref.invalidate(bankConnectionsProvider);
 
     state = state.copyWith(
       session: session,
       importable: session.accounts,
       connectionId: connection.id,
+      connection: connection,
+      reconnecting: null,
     );
   }
 
   /// Persists the accounts the user picked on the import screen (Step 12),
-  /// linked to the [BankConnection] created by [completeConnection].
-  Future<void> importAccounts(
+  /// linked to the [BankConnection] created by [completeConnection], then
+  /// immediately syncs that connection so the user doesn't have to find and
+  /// tap the manual refresh button just to see transactions the first time.
+  /// Returns the number of transactions synced (0 if the sync itself failed
+  /// — the import still succeeds, and the connection card's manual refresh
+  /// remains available as a retry).
+  Future<int> importAccounts(
     List<BankAccountImportSelection> selections,
   ) async {
     final connectionId = state.connectionId;
@@ -332,6 +501,22 @@ class ConnectBankFlow extends _$ConnectBankFlow {
 
     final accountRepository = ref.read(accountRepositoryProvider);
     for (final selection in selections) {
+      final existing = await accountRepository.selectByEbUid(
+        selection.account.uid,
+      );
+      if (existing != null) {
+        // Account already exists (e.g. reconnecting after consent expiry):
+        // relink it to the new connection instead of inserting a duplicate.
+        await accountRepository.updateItem(
+          existing.copy(
+            active: true,
+            ebConnectionId: connectionId,
+            iban: selection.account.iban,
+          ),
+        );
+        continue;
+      }
+
       await accountRepository.insert(
         BankAccount(
           name: selection.name,
@@ -350,7 +535,34 @@ class ConnectBankFlow extends _$ConnectBankFlow {
     }
 
     ref.invalidate(accountsProvider);
+    ref.invalidate(dashboardProvider);
     state = state.copyWith(importable: const []);
+
+    final connection = state.connection;
+    if (connection == null) return 0;
+    try {
+      return await syncConnection(connection);
+    } on EnableBankingException {
+      return 0;
+    } on EnableBankingAuthException {
+      return 0;
+    }
+  }
+
+  /// Syncs [connection]'s linked accounts and returns the total number of
+  /// new transactions imported across all of them.
+  Future<int> syncConnection(BankConnection connection) async {
+    final synced = await ref
+        .read(enableBankingSyncServiceProvider)
+        .syncConnection(connection);
+
+    ref.invalidate(bankConnectionsProvider);
+    ref.invalidate(accountsProvider);
+    ref.invalidate(transactionsProvider);
+    ref.invalidate(dashboardProvider);
+    ref.invalidate(statisticsProvider);
+
+    return synced.values.fold<int>(0, (sum, count) => sum + count);
   }
 
   /// Revokes the Enable Banking session and turns [connection]'s imported
@@ -363,19 +575,19 @@ class ConnectBankFlow extends _$ConnectBankFlow {
     } on EnableBankingException {
       // Consent may already be expired/revoked on the ASPSP side; still
       // finalize the disconnection locally.
+    } on EnableBankingAuthException {
+      // Credentials may be gone/invalid; still finalize the disconnection
+      // locally rather than blocking the user from removing a stale entry.
     }
 
-    final accountRepository = ref.read(accountRepositoryProvider);
-    final linked = await accountRepository.selectLinked();
-    for (final account in linked) {
-      if (account.ebConnectionId == connection.id) {
-        await accountRepository.unlink(account.id!);
-      }
-    }
-
+    // Unlinks the accounts and marks the connection revoked atomically, so
+    // a failure partway through doesn't leave the connection half
+    // disconnected (see finalizeDisconnect). A DB error here is not
+    // caught: unlike the best-effort remote revoke above, it means the
+    // disconnect genuinely didn't happen and the caller needs to know.
     await ref
         .read(bankConnectionRepositoryProvider)
-        .markStatus(connection.id!, BankConnectionStatus.revoked);
+        .finalizeDisconnect(connection.id!);
 
     ref.invalidate(bankConnectionsProvider);
     ref.invalidate(accountsProvider);

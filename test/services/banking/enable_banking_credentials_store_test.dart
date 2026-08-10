@@ -91,6 +91,24 @@ void main() {
       expect(await store.readPrivateKey(), isNull);
     });
 
+    test(
+      'clearConfig removes appId and config but keeps the private key',
+      () async {
+        final store = const EnableBankingCredentialsStore();
+        await store.saveCredentials(
+          appId: 'app-123',
+          privateKeyPem: 'pem',
+          config: const EnableBankingConfig(appId: 'app-123'),
+        );
+
+        await store.clearConfig();
+
+        expect(await store.hasCredentials(), isFalse);
+        expect(await store.readConfig(), isNull);
+        expect(await store.readPrivateKey(), 'pem');
+      },
+    );
+
     test('readCredentials returns a coherent pair even when saveCredentials '
         'lands concurrently mid-read', () async {
       final store = _GatedCredentialsStore();

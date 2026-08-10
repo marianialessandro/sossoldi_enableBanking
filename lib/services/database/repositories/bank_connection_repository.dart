@@ -1,5 +1,6 @@
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
+import '../../../model/bank_account.dart';
 import '../../../model/bank_connection.dart';
 import '../sossoldi_database.dart';
 
@@ -97,5 +98,37 @@ class BankConnectionRepository {
       where: '${BankConnectionFields.id} = ?',
       whereArgs: [id],
     );
+  }
+
+  /// Unlinks every account fed by [connectionId] and marks the connection
+  /// `revoked`, atomically: a failure partway through (e.g. a transient DB
+  /// write error) must not leave some accounts unlinked while others — or
+  /// the connection itself — still point at a connection the user just
+  /// disconnected.
+  Future<void> finalizeDisconnect(int connectionId) async {
+    final db = await _sossoldiDB.database;
+
+    await db.transaction((txn) async {
+      await txn.update(
+        bankAccountTable,
+        {
+          BankAccountFields.ebAccountUid: null,
+          BankAccountFields.ebConnectionId: null,
+          BankAccountFields.iban: null,
+          BankAccountFields.lastSyncAt: null,
+        },
+        where: '${BankAccountFields.ebConnectionId} = ?',
+        whereArgs: [connectionId],
+      );
+      await txn.update(
+        bankConnectionTable,
+        {
+          BankConnectionFields.status: BankConnectionStatus.revoked.code,
+          BankConnectionFields.updatedAt: DateTime.now().toIso8601String(),
+        },
+        where: '${BankConnectionFields.id} = ?',
+        whereArgs: [connectionId],
+      );
+    });
   }
 }

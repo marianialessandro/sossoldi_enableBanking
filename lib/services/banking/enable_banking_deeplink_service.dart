@@ -80,7 +80,9 @@ class EnableBankingDeeplinkService {
 
   /// Starts routing callbacks to [onCallback]. Safe to call more than once:
   /// the stream is subscribed and the cold start link consumed only once.
-  Future<void> start(void Function(EnableBankingCallback) onCallback) async {
+  Future<void> start(
+    Future<void> Function(EnableBankingCallback) onCallback,
+  ) async {
     _subscription ??= _source.uriStream.listen(
       (uri) => _dispatch(uri, onCallback),
     );
@@ -89,10 +91,13 @@ class EnableBankingDeeplinkService {
     _initialLinkChecked = true;
 
     final initial = await _source.getInitialUri();
-    if (initial != null) _dispatch(initial, onCallback);
+    if (initial != null) await _dispatch(initial, onCallback);
   }
 
-  void _dispatch(Uri uri, void Function(EnableBankingCallback) onCallback) {
+  Future<void> _dispatch(
+    Uri uri,
+    Future<void> Function(EnableBankingCallback) onCallback,
+  ) async {
     // On some platforms `app_links` also replays the launch link on the
     // stream: skip an URI identical to the previous one so a cold start
     // doesn't spend the same authorization code twice.
@@ -102,7 +107,14 @@ class EnableBankingDeeplinkService {
     if (callback == null) return;
 
     _lastHandled = uri.toString();
-    onCallback(callback);
+    try {
+      await onCallback(callback);
+    } catch (_) {
+      // onCallback (BankCallbackHandler.handle) is expected to catch its
+      // own errors and always settle into a stable state; this is only a
+      // safety net so an unexpected failure surfaces as a dropped callback
+      // instead of an unhandled async error.
+    }
   }
 
   void dispose() {

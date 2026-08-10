@@ -84,7 +84,7 @@ void main() {
 
   group('start', () {
     test('routes links received while the app is running', () async {
-      await service.start(received.add);
+      await service.start((cb) async => received.add(cb));
 
       source.controller.add(
         Uri.parse('sossoldi://eb-callback?code=one&state=csrf-1'),
@@ -101,7 +101,7 @@ void main() {
         'sossoldi://eb-callback?code=cold&state=csrf-1',
       );
 
-      await service.start(received.add);
+      await service.start((cb) async => received.add(cb));
 
       expect(received.single.code, 'cold');
     });
@@ -111,7 +111,7 @@ void main() {
         'sossoldi://eb-callback?code=cold&state=csrf-1',
       );
 
-      await service.start(received.add);
+      await service.start((cb) async => received.add(cb));
       // Some platforms replay the launch link on the stream.
       source.controller.add(source.initialUri!);
       await pumpEventQueue();
@@ -120,8 +120,8 @@ void main() {
     });
 
     test('calling start twice keeps a single subscription', () async {
-      await service.start(received.add);
-      await service.start(received.add);
+      await service.start((cb) async => received.add(cb));
+      await service.start((cb) async => received.add(cb));
 
       source.controller.add(
         Uri.parse('sossoldi://eb-callback?code=one&state=csrf-1'),
@@ -132,7 +132,7 @@ void main() {
     });
 
     test('stops routing after dispose', () async {
-      await service.start(received.add);
+      await service.start((cb) async => received.add(cb));
       service.dispose();
 
       source.controller.add(
@@ -141,6 +141,26 @@ void main() {
       await pumpEventQueue();
 
       expect(received, isEmpty);
+    });
+
+    test('an onCallback failure is swallowed instead of becoming an unhandled '
+        'async error, and later distinct links still get through', () async {
+      var calls = 0;
+      await service.start((_) async {
+        calls++;
+        throw StateError('boom');
+      });
+
+      source.controller.add(
+        Uri.parse('sossoldi://eb-callback?code=one&state=csrf-1'),
+      );
+      await pumpEventQueue();
+      source.controller.add(
+        Uri.parse('sossoldi://eb-callback?code=two&state=csrf-2'),
+      );
+      await pumpEventQueue();
+
+      expect(calls, 2);
     });
   });
 }

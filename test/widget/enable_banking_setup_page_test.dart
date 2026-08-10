@@ -6,6 +6,7 @@ import 'package:sossoldi/providers/banking_provider.dart';
 import 'package:sossoldi/services/banking/enable_banking_auth.dart';
 import 'package:sossoldi/services/banking/enable_banking_config.dart';
 import 'package:sossoldi/services/banking/enable_banking_credentials_store.dart';
+import 'package:sossoldi/services/banking/enable_banking_key_generator.dart';
 import 'package:sossoldi/ui/theme/app_theme.dart';
 
 /// In-memory stand-in for the secure storage backed store: every method the
@@ -33,12 +34,23 @@ class _FakeCredentialsStore extends EnableBankingCredentialsStore {
   Future<String?> readPrivateKey() async => privateKeyPem;
 
   @override
+  Future<void> savePrivateKey(String privateKeyPem) async {
+    this.privateKeyPem = privateKeyPem;
+  }
+
+  @override
   Future<bool> hasCredentials() async => appId != null && privateKeyPem != null;
 
   @override
   Future<void> clear() async {
     appId = null;
     privateKeyPem = null;
+    config = null;
+  }
+
+  @override
+  Future<void> clearConfig() async {
+    appId = null;
     config = null;
   }
 }
@@ -62,6 +74,20 @@ class _FakeAuth extends EnableBankingAuth {
   }
 }
 
+/// Returns fixed fake key material instantly, instead of running real RSA
+/// key generation.
+class _FakeKeyGenerator extends EnableBankingKeyGenerator {
+  const _FakeKeyGenerator();
+
+  @override
+  Future<EnableBankingKeyMaterial> generate({
+    int keySize = kEnableBankingKeySize,
+  }) async => const EnableBankingKeyMaterial(
+    privateKeyPem: 'GENERATED-PEM',
+    certificatePem: 'GENERATED-CERT',
+  );
+}
+
 void main() {
   late _FakeCredentialsStore store;
 
@@ -72,6 +98,9 @@ void main() {
           enableBankingCredentialsStoreProvider.overrideWithValue(store),
           enableBankingAuthProvider.overrideWithValue(
             _FakeAuth(keyIsValid: keyIsValid),
+          ),
+          enableBankingKeyGeneratorProvider.overrideWithValue(
+            const _FakeKeyGenerator(),
           ),
         ],
         child: MaterialApp(
@@ -101,6 +130,22 @@ void main() {
     expect(find.text('Credentials configured'), findsNothing);
     expect(find.text('Clear credentials'), findsNothing);
   });
+
+  testWidgets(
+    'the private key field is obscured by default and reveals on toggle',
+    (tester) async {
+      await pumpPage(tester);
+
+      final pemField = find.byType(TextField).at(1);
+      expect(tester.widget<TextField>(pemField).obscureText, isTrue);
+
+      await tester.tap(find.byIcon(Icons.visibility));
+      await tester.pumpAndSettle();
+
+      expect(tester.widget<TextField>(pemField).obscureText, isFalse);
+      expect(find.byIcon(Icons.visibility_off), findsOneWidget);
+    },
+  );
 
   testWidgets('saves the credentials entered by the user', (tester) async {
     await pumpPage(tester);
@@ -160,6 +205,72 @@ void main() {
     expect(find.text('Invalid private key'), findsOneWidget);
   });
 
+  group('generating a key in-app', () {
+    testWidgets('stores the generated key and shows the pending banner', (
+      tester,
+    ) async {
+      await pumpPage(tester);
+
+      await tester.ensureVisible(find.text('Generate new key & certificate'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Generate new key & certificate'));
+      await tester.pumpAndSettle();
+
+      expect(store.privateKeyPem, 'GENERATED-PEM');
+      expect(
+        find.text(
+          'Key generated — upload the certificate to Enable Banking, then '
+          'enter your app_id below',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.text(
+          'Key generated. Upload the certificate you just saved to your '
+          'Enable Banking application, then paste the app_id below and '
+          'save.',
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('asks for confirmation before replacing an existing key', (
+      tester,
+    ) async {
+      store.privateKeyPem = 'EXISTING-PEM';
+      await pumpPage(tester);
+
+      await tester.ensureVisible(find.text('Generate new key & certificate'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Generate new key & certificate'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Generate a new key?'), findsOneWidget);
+      expect(store.privateKeyPem, 'EXISTING-PEM');
+
+      await tester.tap(find.text('Generate'));
+      await tester.pumpAndSettle();
+
+      expect(store.privateKeyPem, 'GENERATED-PEM');
+    });
+
+    testWidgets('cancelling the confirmation keeps the existing key', (
+      tester,
+    ) async {
+      store.privateKeyPem = 'EXISTING-PEM';
+      await pumpPage(tester);
+
+      await tester.ensureVisible(find.text('Generate new key & certificate'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Generate new key & certificate'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+
+      expect(store.privateKeyPem, 'EXISTING-PEM');
+    });
+  });
+
   group('with credentials already saved', () {
     setUp(() {
       store
@@ -215,5 +326,24 @@ void main() {
       expect(find.text('Credentials cleared'), findsOneWidget);
       expect(find.text('Credentials configured'), findsNothing);
     });
+
+    testWidgets(
+      'regenerating the key clears the old config but keeps the new key '
+      'readable',
+      (tester) async {
+        await pumpPage(tester);
+
+        await tester.ensureVisible(find.text('Generate new key & certificate'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Generate new key & certificate'));
+        await tester.pumpAndSettle();
+
+        expect(store.appId, isNull);
+        expect(store.config, isNull);
+        // The key just written by the generator must survive clearing the
+        // stale app_id/config tied to the previous certificate.
+        expect(store.privateKeyPem, 'GENERATED-PEM');
+      },
+    );
   });
 }
