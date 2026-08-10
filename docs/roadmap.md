@@ -133,6 +133,11 @@ Users want tools to **predict future financial health**. This will start with:
 To **limit manual entry**, this feature will:
 - Integrate with **bank APIs** (where available) to fetch transactions automatically.
 
+**Status:** implemented via [Enable Banking](https://enablebanking.com/) (PSD2),
+using a Bring-Your-Own-Credentials model since Sossoldi has no backend of its
+own to hold a shared API key. See the [setup guide](setup/enable-banking.md)
+for how to register an application and link a bank.
+
 
 ### 2. Google Sheets Integration (Export Financial Data for Deeper Analysis)
 For users who prefer **custom analysis**, this feature will:
