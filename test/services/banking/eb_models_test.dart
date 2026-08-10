@@ -3,10 +3,12 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:sossoldi/services/banking/enable_banking_exception.dart';
 import 'package:sossoldi/services/banking/models/aspsp.dart';
 import 'package:sossoldi/services/banking/models/eb_account.dart';
 import 'package:sossoldi/services/banking/models/eb_balance.dart';
 import 'package:sossoldi/services/banking/models/eb_session.dart';
+import 'package:sossoldi/services/banking/models/eb_transaction.dart';
 import 'package:sossoldi/services/banking/models/eb_transactions_page.dart';
 
 Map<String, dynamic> _loadJson(String name) =>
@@ -70,6 +72,53 @@ void main() {
     });
   });
 
+  group('EbTransaction.fromJson', () {
+    Map<String, dynamic> validTransaction() => {
+      'entry_reference': 'ref-001',
+      'status': 'BOOK',
+      'transaction_amount': {'amount': '10.33', 'currency': 'EUR'},
+      'credit_debit_indicator': 'CRDT',
+    };
+
+    test('parses a well-formed transaction', () {
+      final tx = EbTransaction.fromJson(validTransaction());
+
+      expect(tx.status, 'BOOK');
+      expect(tx.transactionAmount.amount, 10.33);
+      expect(tx.creditDebitIndicator, 'CRDT');
+    });
+
+    test('throws EnableBankingException instead of a raw TypeError when '
+        'credit_debit_indicator is missing', () {
+      final json = validTransaction()..remove('credit_debit_indicator');
+
+      expect(
+        () => EbTransaction.fromJson(json),
+        throwsA(isA<EnableBankingException>()),
+      );
+    });
+
+    test('throws EnableBankingException instead of a raw TypeError when '
+        'transaction_amount is null', () {
+      final json = validTransaction()..['transaction_amount'] = null;
+
+      expect(
+        () => EbTransaction.fromJson(json),
+        throwsA(isA<EnableBankingException>()),
+      );
+    });
+
+    test('throws EnableBankingException instead of a raw TypeError when '
+        'status is missing', () {
+      final json = validTransaction()..remove('status');
+
+      expect(
+        () => EbTransaction.fromJson(json),
+        throwsA(isA<EnableBankingException>()),
+      );
+    });
+  });
+
   group('EbTransactionsPage.fromJson', () {
     late EbTransactionsPage page;
 
@@ -106,6 +155,28 @@ void main() {
       expect(debit.isBooked, isFalse);
       expect(debit.bookingDate, isNull);
       expect(debit.note, 'supermarket');
+    });
+
+    test('skips a malformed transaction instead of failing the whole page, '
+        'keeping the valid ones from the same page', () {
+      final malformedPage = EbTransactionsPage.fromJson({
+        'transactions': [
+          {
+            'entry_reference': 'ref-good',
+            'status': 'BOOK',
+            'transaction_amount': {'amount': '5.00', 'currency': 'EUR'},
+            'credit_debit_indicator': 'CRDT',
+          },
+          {
+            'entry_reference': 'ref-bad',
+            'status': 'BOOK',
+            // Missing transaction_amount and credit_debit_indicator.
+          },
+        ],
+      });
+
+      expect(malformedPage.transactions, hasLength(1));
+      expect(malformedPage.transactions.single.stableId, 'ref-good');
     });
   });
 

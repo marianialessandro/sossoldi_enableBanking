@@ -78,8 +78,7 @@ class EnableBankingAuth {
       return _cachedToken!;
     }
 
-    final config = await store.readConfig();
-    final privateKeyPem = await store.readPrivateKey();
+    final (config, privateKeyPem) = await store.readCredentials();
     if (config == null || privateKeyPem == null) {
       throw const EnableBankingAuthException(
         'Enable Banking credentials are not configured',

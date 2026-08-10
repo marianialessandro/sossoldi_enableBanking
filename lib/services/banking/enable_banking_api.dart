@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:http/http.dart' as http;
 
@@ -13,6 +15,11 @@ import 'models/eb_session.dart';
 import 'models/eb_transactions_page.dart';
 
 const _kBaseUrl = 'https://api.enablebanking.com';
+
+/// Applied to every request so a stuck ASPSP/API endpoint fails fast
+/// instead of leaving the caller (e.g. a manual sync button) hanging
+/// indefinitely.
+const _kRequestTimeout = Duration(seconds: 30);
 
 String _formatDate(DateTime date) {
   final utc = date.toUtc();
@@ -32,13 +39,19 @@ class EnableBankingApi {
   final EnableBankingCredentialsStore _store;
   final http.Client _client;
 
+  final Duration _requestTimeout;
+
+  /// [requestTimeout] defaults to the production value; only overridden in
+  /// tests to make timeout handling verifiable without a real 30s wait.
   EnableBankingApi({
     required EnableBankingAuth auth,
     required EnableBankingCredentialsStore store,
     http.Client? client,
+    Duration requestTimeout = _kRequestTimeout,
   }) : _auth = auth,
        _store = store,
-       _client = client ?? http.Client();
+       _client = client ?? http.Client(),
+       _requestTimeout = requestTimeout;
 
   Future<Map<String, String>> _headers() async => {
     'Authorization': 'Bearer ${await _auth.getValidToken(_store)}',
@@ -62,6 +75,34 @@ class EnableBankingApi {
     );
   }
 
+  /// Runs [request], converting a timed out or dropped connection into an
+  /// [EnableBankingException] (`statusCode: null`) instead of letting a raw
+  /// `TimeoutException`/`SocketException` escape. Every call site that
+  /// already handles `EnableBankingException` (nearly all of them) then
+  /// covers these cases too, without needing its own generic `catch`.
+  Future<http.Response> _send(Future<http.Response> Function() request) async {
+    try {
+      return await request().timeout(_requestTimeout);
+    } on TimeoutException {
+      throw const EnableBankingException(message: 'Request timed out');
+    } on SocketException catch (e) {
+      throw EnableBankingException(message: e.message);
+    }
+  }
+
+  /// Same rationale as [_send]: a non-JSON body (e.g. an HTML error page
+  /// from a proxy/CDN in front of the API) becomes an
+  /// [EnableBankingException] instead of a raw `FormatException`.
+  Map<String, dynamic> _decode(String body) {
+    try {
+      return jsonDecode(body) as Map<String, dynamic>;
+    } on FormatException {
+      throw const EnableBankingException(
+        message: 'Unexpected response from Enable Banking',
+      );
+    }
+  }
+
   Future<Map<String, dynamic>> _get(
     String path, [
     Map<String, String>? query,
@@ -69,9 +110,11 @@ class EnableBankingApi {
     final uri = Uri.parse('$_kBaseUrl$path').replace(
       queryParameters: query != null && query.isNotEmpty ? query : null,
     );
-    final response = await _client.get(uri, headers: await _headers());
+    final response = await _send(
+      () async => _client.get(uri, headers: await _headers()),
+    );
     _check(response);
-    return jsonDecode(response.body) as Map<String, dynamic>;
+    return _decode(response.body);
   }
 
   Future<Map<String, dynamic>> _post(
@@ -79,18 +122,19 @@ class EnableBankingApi {
     Map<String, dynamic> body,
   ) async {
     final uri = Uri.parse('$_kBaseUrl$path');
-    final response = await _client.post(
-      uri,
-      headers: await _headers(),
-      body: jsonEncode(body),
+    final response = await _send(
+      () async =>
+          _client.post(uri, headers: await _headers(), body: jsonEncode(body)),
     );
     _check(response);
-    return jsonDecode(response.body) as Map<String, dynamic>;
+    return _decode(response.body);
   }
 
   Future<void> _delete(String path) async {
     final uri = Uri.parse('$_kBaseUrl$path');
-    final response = await _client.delete(uri, headers: await _headers());
+    final response = await _send(
+      () async => _client.delete(uri, headers: await _headers()),
+    );
     _check(response);
   }
 
@@ -112,6 +156,7 @@ class EnableBankingApi {
     required String aspspCountry,
     required String state,
     required DateTime validUntil,
+    String redirectUri = kEbRedirectUri,
     String psuType = 'personal',
     String? language,
   }) async {
@@ -123,7 +168,7 @@ class EnableBankingApi {
       },
       'aspsp': {'name': aspspName, 'country': aspspCountry},
       'state': state,
-      'redirect_url': kEbRedirectUri,
+      'redirect_url': redirectUri,
       'psu_type': psuType,
       'language': ?language,
     });

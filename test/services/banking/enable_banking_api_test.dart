@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -94,6 +95,34 @@ void main() {
         expect(authorization.authorizationId, 'auth-1');
       },
     );
+
+    test('startAuthorization sends an explicit redirectUri instead of the '
+        "app's default scheme (needed when Enable Banking rejects it, "
+        'typically in production)', () async {
+      late http.Request captured;
+      final api = _apiWith((request) async {
+        captured = request;
+        return _json({
+          'url': 'https://bank.example/consent',
+          'authorization_id': 'auth-1',
+          'psu_id_hash': 'hash',
+        });
+      });
+
+      await api.startAuthorization(
+        aspspName: 'Test Bank',
+        aspspCountry: 'IT',
+        state: 'csrf-state',
+        validUntil: DateTime.utc(2026, 8, 1, 12),
+        redirectUri: 'https://example.com/sossoldi/eb-callback.html',
+      );
+
+      final body = jsonDecode(captured.body) as Map<String, dynamic>;
+      expect(
+        body['redirect_url'],
+        'https://example.com/sossoldi/eb-callback.html',
+      );
+    });
 
     test('createSession posts the code and parses the session', () async {
       late http.Request captured;
@@ -237,6 +266,58 @@ void main() {
             isTrue,
           ),
         ),
+      );
+    });
+
+    test('converts a request timeout into an EnableBankingException instead '
+        'of a raw TimeoutException', () async {
+      final api = EnableBankingApi(
+        auth: _FakeAuth(),
+        store: const EnableBankingCredentialsStore(),
+        requestTimeout: const Duration(milliseconds: 10),
+        client: MockClient((request) async {
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+          return _json({'aspsps': []});
+        }),
+      );
+
+      await expectLater(
+        () => api.getAspsps(country: 'IT'),
+        throwsA(
+          isA<EnableBankingException>().having(
+            (e) => e.statusCode,
+            'statusCode',
+            isNull,
+          ),
+        ),
+      );
+    });
+
+    test('converts a dropped connection into an EnableBankingException instead '
+        'of a raw SocketException', () async {
+      final api = _apiWith(
+        (request) async => throw const SocketException('Connection refused'),
+      );
+
+      await expectLater(
+        () => api.getAspsps(country: 'IT'),
+        throwsA(isA<EnableBankingException>()),
+      );
+    });
+
+    test('converts a non-JSON success body into an EnableBankingException '
+        'instead of a raw FormatException', () async {
+      final api = _apiWith(
+        (request) async => http.Response(
+          '<html>Bad Gateway</html>',
+          200,
+          headers: {'content-type': 'text/html'},
+        ),
+      );
+
+      await expectLater(
+        () => api.getAspsps(country: 'IT'),
+        throwsA(isA<EnableBankingException>()),
       );
     });
   });
