@@ -15,19 +15,16 @@ import 'package:sossoldi/services/database/repositories/transactions_repository.
 import 'package:sossoldi/services/database/sossoldi_database.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
-/// Bypasses credential/JWT signing entirely: the API client only needs a
-/// valid bearer token string, not a real signature (mirrors the double used
-/// in enable_banking_api_test.dart).
+// Bypasses JWT signing; the API client only needs a bearer token string
+// (mirrors the fake in enable_banking_api_test.dart).
 class _FakeAuth extends EnableBankingAuth {
   @override
   Future<String> getValidToken(EnableBankingCredentialsStore store) async =>
       'test-token';
 }
 
-/// Simulates a DB failure while marking a connection EXPIRED on a 401 — the
-/// one path left in syncConnection that can still throw all the way up to
-/// syncAll's own try/catch after the per-account/per-connection isolation
-/// added for other bugs.
+// Simulates markStatus throwing on a 401 — the last path in syncConnection
+// that can still throw up to syncAll's try/catch (others are isolated).
 class _ThrowingMarkStatusRepository extends BankConnectionRepository {
   _ThrowingMarkStatusRepository({required super.database});
 
@@ -177,11 +174,65 @@ void main() {
       final synced = await accountRepository.selectById(account.id!);
       expect(synced.lastSyncAt, isNotNull);
 
-      // Re-syncing the same fixture data must not create duplicates.
       final insertedAgain = await service.syncAccount(synced);
       expect(insertedAgain, 0);
       expect(await transactionsRepository.selectAll(), hasLength(2));
     });
+
+    test(
+      'rebases imported history to the authoritative booked balance',
+      () async {
+        final account = await accountRepository.insert(
+          const BankAccount(
+            name: 'Checking',
+            symbol: 'payments',
+            color: 1,
+            startingValue: 372.38,
+            active: true,
+            countNetWorth: true,
+            mainAccount: false,
+            order: 0,
+            ebAccountUid: 'acc-uid',
+          ),
+        );
+
+        final service = serviceWith((request) async {
+          if (request.url.path.endsWith('/balances')) {
+            return _json({
+              'balances': [
+                {
+                  'name': 'Closing booked',
+                  'balance_amount': {'amount': '232.75', 'currency': 'EUR'},
+                  'balance_type': 'CLBD',
+                },
+              ],
+            });
+          }
+          return _json({
+            'transactions': [
+              _ebTransaction(
+                status: 'BOOK',
+                creditDebitIndicator: 'CRDT',
+                amount: '100.00',
+                entryReference: 'entry-in',
+              ),
+              _ebTransaction(
+                status: 'BOOK',
+                creditDebitIndicator: 'DBIT',
+                amount: '166.49',
+                entryReference: 'entry-out',
+              ),
+            ],
+          });
+        });
+
+        await service.syncAccount(account);
+
+        final reloaded = (await accountRepository.selectAll()).single;
+        expect(reloaded.total, closeTo(232.75, 0.001));
+        expect(reloaded.startingValue, closeTo(299.24, 0.001));
+      },
+    );
 
     test('is still idempotent on re-sync when the ASPSP sends neither '
         'entry_reference nor transaction_id (observed in production with at '
@@ -207,8 +258,7 @@ void main() {
               status: 'BOOK',
               creditDebitIndicator: 'DBIT',
               amount: '9.90',
-              // No entry_reference and no transaction_id: this is the
-              // real-world gap that used to bypass dedup entirely.
+              // Missing both IDs — the gap that used to slip past dedup.
             ),
           ],
         }),

@@ -2,7 +2,6 @@ import 'base_entity.dart';
 
 const String bankConnectionTable = 'bankConnection';
 
-/// SQL identifiers for [bankConnectionTable], added in migration 0008.
 class BankConnectionFields extends BaseEntityFields {
   static String id = BaseEntityFields.getId;
   static String aspspName = 'aspspName';
@@ -44,8 +43,6 @@ enum BankConnectionStatus {
   String toJson() => code;
 }
 
-/// A linked bank (Enable Banking consent/session), independent of the
-/// individual [BankAccount]s imported from it.
 class BankConnection extends BaseEntity {
   final String aspspName;
   final String aspspCountry;

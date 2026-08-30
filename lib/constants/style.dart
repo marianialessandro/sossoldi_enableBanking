@@ -1,15 +1,5 @@
 import 'package:flutter/material.dart';
 
-/// The app's default text theme pins `fontFamily` to the bundled NunitoSans,
-/// which has no emoji glyphs (flags included) and no fallback of its own —
-/// apply this to any `TextStyle` rendering emoji so Flutter falls back to
-/// the platform's own emoji font instead of showing missing-glyph boxes.
-const List<String> kEmojiFontFallback = [
-  'Apple Color Emoji',
-  'Noto Color Emoji',
-  'Segoe UI Emoji',
-];
-
 // Container shadow
 BoxShadow defaultShadow = BoxShadow(
   color: blue1.withValues(alpha: 0.20),

@@ -2,8 +2,6 @@ import 'package:flutter/material.dart';
 
 import '../device.dart';
 
-/// Messenger of the root [MaterialApp], used by [showRootSnackBar] to give
-/// feedback from outside the widget tree.
 final GlobalKey<ScaffoldMessengerState> rootScaffoldMessengerKey =
     GlobalKey<ScaffoldMessengerState>();
 
@@ -56,8 +54,6 @@ void showSnackBar(
   ScaffoldMessenger.of(context).showSnackBar(snackBar);
 }
 
-/// Shows a snack bar without a [BuildContext], e.g. from an app level
-/// listener such as the Enable Banking OAuth callback handler.
 void showRootSnackBar({required String message}) {
   final messenger = rootScaffoldMessengerKey.currentState;
   if (messenger == null) return;

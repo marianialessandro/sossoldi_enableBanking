@@ -1,10 +1,5 @@
 import 'eb_account.dart';
 
-/// An authorized session as returned by `POST /sessions` and
-/// `GET /sessions/{id}`.
-///
-/// [aspspName]/[aspspCountry] come from the nested `aspsp` object and
-/// [validUntil] from `access.valid_until`.
 class EbSession {
   final String sessionId;
   final List<EbAccount> accounts;

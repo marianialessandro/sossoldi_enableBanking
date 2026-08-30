@@ -10,8 +10,6 @@ import 'package:sossoldi/services/banking/enable_banking_config.dart';
 import 'package:sossoldi/services/banking/enable_banking_credentials_store.dart';
 import 'package:sossoldi/services/banking/enable_banking_exception.dart';
 
-/// Bypasses credential/JWT signing entirely: the API client only needs a
-/// valid bearer token string, not a real signature.
 class _FakeAuth extends EnableBankingAuth {
   @override
   Future<String> getValidToken(EnableBankingCredentialsStore store) async =>
@@ -97,8 +95,7 @@ void main() {
     );
 
     test('startAuthorization sends an explicit redirectUri instead of the '
-        "app's default scheme (needed when Enable Banking rejects it, "
-        'typically in production)', () async {
+        'hosted default', () async {
       late http.Request captured;
       final api = _apiWith((request) async {
         captured = request;

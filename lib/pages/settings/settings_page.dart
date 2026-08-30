@@ -51,7 +51,7 @@ var settingsOptions = [
     Icons.account_balance,
     "Bank sync",
     "Connect your bank and import transactions",
-    "/enable-banking-setup",
+    "/bank-sync",
   ],
   [
     Icons.notifications_active,

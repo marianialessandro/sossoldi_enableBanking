@@ -4,10 +4,8 @@ import 'package:app_links/app_links.dart';
 
 import 'enable_banking_config.dart';
 
-final Uri _redirect = Uri.parse(kEbRedirectUri);
+final Uri _redirect = Uri.parse(kEbAppCallbackUri);
 
-/// Query of a `sossoldi://eb-callback` deep link: what the bank sends back
-/// once the user has approved (or refused) the consent.
 class EnableBankingCallback {
   final String? code;
   final String? state;
@@ -23,18 +21,15 @@ class EnableBankingCallback {
 
   bool get isSuccess => error == null && code != null;
 
-  /// User facing reason why the authorization did not go through.
   String get errorMessage =>
       errorDescription ?? error ?? 'Authorization was not completed';
 }
 
-/// Source of incoming deep links: wraps `app_links` behind an interface so
-/// the callback plumbing can be unit tested without platform channels.
+// Wraps `app_links` behind an interface so the callback plumbing can be
+// unit tested without platform channels.
 abstract class UriLinkSource {
-  /// Links delivered while the app is already running.
   Stream<Uri> get uriStream;
 
-  /// Link the app was cold started with, if any.
   Future<Uri?> getInitialUri();
 }
 
@@ -50,8 +45,6 @@ class AppLinksUriSource implements UriLinkSource {
   Future<Uri?> getInitialUri() => _appLinks.getInitialLink();
 }
 
-/// Captures the Enable Banking OAuth callback, both while the app is alive
-/// (foreground/background) and when the link is what started it.
 class EnableBankingDeeplinkService {
   final UriLinkSource _source;
 
@@ -62,8 +55,6 @@ class EnableBankingDeeplinkService {
   EnableBankingDeeplinkService({UriLinkSource? source})
     : _source = source ?? AppLinksUriSource();
 
-  /// Returns the parsed callback, or null if [uri] is not the Enable Banking
-  /// redirect (other deep links are none of our business).
   static EnableBankingCallback? parse(Uri uri) {
     if (uri.scheme != _redirect.scheme || uri.host != _redirect.host) {
       return null;
@@ -78,8 +69,8 @@ class EnableBankingDeeplinkService {
     );
   }
 
-  /// Starts routing callbacks to [onCallback]. Safe to call more than once:
-  /// the stream is subscribed and the cold start link consumed only once.
+  // Safe to call more than once: the stream is subscribed and the cold
+  // start link consumed only once.
   Future<void> start(
     Future<void> Function(EnableBankingCallback) onCallback,
   ) async {
@@ -98,9 +89,8 @@ class EnableBankingDeeplinkService {
     Uri uri,
     Future<void> Function(EnableBankingCallback) onCallback,
   ) async {
-    // On some platforms `app_links` also replays the launch link on the
-    // stream: skip an URI identical to the previous one so a cold start
-    // doesn't spend the same authorization code twice.
+    // app_links can replay the launch link, so skip a URI identical to the
+    // previous one to avoid spending the same code twice.
     if (uri.toString() == _lastHandled) return;
 
     final callback = parse(uri);
@@ -110,10 +100,8 @@ class EnableBankingDeeplinkService {
     try {
       await onCallback(callback);
     } catch (_) {
-      // onCallback (BankCallbackHandler.handle) is expected to catch its
-      // own errors and always settle into a stable state; this is only a
-      // safety net so an unexpected failure surfaces as a dropped callback
-      // instead of an unhandled async error.
+      // Safety net: onCallback should handle its own errors; this only
+      // avoids an unhandled async error.
     }
   }
 

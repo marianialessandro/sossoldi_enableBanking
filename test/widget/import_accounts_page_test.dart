@@ -27,8 +27,6 @@ class _FakeAuth extends EnableBankingAuth {
       'test-token';
 }
 
-/// Keeps [EnableBankingSettings] off the real secure storage platform
-/// channel, which isn't mocked in this test.
 class _FakeCredentialsStore extends EnableBankingCredentialsStore {
   const _FakeCredentialsStore();
 
@@ -94,9 +92,8 @@ http.Response _json(Object body) => http.Response(
   headers: {'content-type': 'application/json'},
 );
 
-/// [balanceGate], when given, delays the `/balances` response until it
-/// completes — used to simulate the balance provider still being in
-/// flight when the user taps import.
+// balanceGate delays the /balances response, simulating a fetch still
+// in flight.
 Future<http.Response> _handle(
   http.Request request, {
   Completer<void>? balanceGate,
@@ -151,11 +148,8 @@ void main() {
   late ProviderContainer container;
   final navigatorKey = GlobalKey<NavigatorState>();
 
-  /// Walks the flow up to the point the import page starts from: a consent
-  /// completed, a session created and its accounts waiting to be imported.
-  /// [balanceGate], when given, delays the balance fetch and skips the
-  /// final `pumpAndSettle` (which would otherwise hang waiting for it), so
-  /// the caller can interact with the page before the balance resolves.
+  // With balanceGate set, skips the final pumpAndSettle (it would hang)
+  // so the caller can interact before the balance resolves.
   Future<void> pumpImportPage(
     WidgetTester tester, {
     Completer<void>? balanceGate,
@@ -183,9 +177,8 @@ void main() {
     );
     addTearDown(container.dispose);
 
-    // The flow is autoDispose: hold a listener the way BankCallbackHandler
-    // does in the app, otherwise the session is thrown away before the page
-    // is built.
+    // autoDispose flow: hold a listener like BankCallbackHandler does, or
+    // the session is thrown away before the page is built.
     final subscription = container.listen(connectBankFlowProvider, (_, _) {});
     addTearDown(subscription.close);
 
@@ -245,8 +238,7 @@ void main() {
   ) async {
     await pumpImportPage(tester);
 
-    // Drop the second account from the import (its tile is below the fold
-    // because the first one is expanded).
+    // Tile is below the fold since the first account is expanded.
     await tester.ensureVisible(find.byType(Switch).at(1));
     await tester.pumpAndSettle();
     await tester.tap(find.byType(Switch).at(1));
@@ -270,9 +262,8 @@ void main() {
     final balanceGate = Completer<void>();
     await pumpImportPage(tester, balanceGate: balanceGate);
 
-    // Tapped while the /balances request is still pending: _import must
-    // await it rather than reading whatever ebAccountBalanceProvider
-    // happens to hold yet (nothing, at this point).
+    // Tapped while /balances is pending: _import must await it, not read
+    // whatever ebAccountBalanceProvider holds yet (nothing).
     await tester.tap(find.text('IMPORT SELECTED'));
     await tester.pump();
 

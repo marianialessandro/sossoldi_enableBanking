@@ -4,9 +4,6 @@ import '../../../constants/constants.dart';
 import '../../../constants/style.dart';
 import '../../../ui/device.dart';
 
-/// Icon and colour picker of an account, same layout and behaviour as the
-/// one built into the create/edit account page, reusable per imported
-/// account.
 class AccountIconColorSelector extends StatefulWidget {
   final String selectedIcon;
   final int selectedColor;

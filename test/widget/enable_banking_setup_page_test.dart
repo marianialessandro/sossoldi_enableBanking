@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sossoldi/pages/settings/banking/enable_banking_setup_page.dart';
@@ -9,8 +10,6 @@ import 'package:sossoldi/services/banking/enable_banking_credentials_store.dart'
 import 'package:sossoldi/services/banking/enable_banking_key_generator.dart';
 import 'package:sossoldi/ui/theme/app_theme.dart';
 
-/// In-memory stand-in for the secure storage backed store: every method the
-/// page uses is overridden, so the platform channel is never touched.
 class _FakeCredentialsStore extends EnableBankingCredentialsStore {
   String? appId;
   String? privateKeyPem;
@@ -55,7 +54,6 @@ class _FakeCredentialsStore extends EnableBankingCredentialsStore {
   }
 }
 
-/// Skips the real RS256 signing: the page only uses it to validate the PEM.
 class _FakeAuth extends EnableBankingAuth {
   _FakeAuth({this.keyIsValid = true});
 
@@ -74,8 +72,6 @@ class _FakeAuth extends EnableBankingAuth {
   }
 }
 
-/// Returns fixed fake key material instantly, instead of running real RSA
-/// key generation.
 class _FakeKeyGenerator extends EnableBankingKeyGenerator {
   const _FakeKeyGenerator();
 
@@ -120,43 +116,30 @@ void main() {
     await pumpPage(tester);
 
     expect(find.text('Bank sync'), findsOneWidget);
-    expect(find.text('APPLICATION ID'), findsOneWidget);
-    expect(find.text('PRIVATE KEY (PEM)'), findsOneWidget);
-    expect(find.text('ENVIRONMENT'), findsOneWidget);
-    expect(find.text('REDIRECT URI'), findsOneWidget);
-    expect(find.text('sossoldi://eb-callback'), findsOneWidget);
+    expect(find.text('Register your application'), findsOneWidget);
+    expect(find.text('Generate your key'), findsOneWidget);
+    expect(find.text('Enter your application ID'), findsOneWidget);
+    expect(find.text('Register the redirect URI'), findsOneWidget);
+    expect(find.text('Choose your environment'), findsOneWidget);
+    expect(find.text(kEbRedirectUri), findsOneWidget);
     expect(find.text('SAVE CREDENTIALS'), findsOneWidget);
 
     expect(find.text('Credentials configured'), findsNothing);
     expect(find.text('Clear credentials'), findsNothing);
+    expect(find.text('Import from file'), findsNothing);
+    expect(find.byIcon(Icons.upload_file), findsNothing);
   });
 
-  testWidgets(
-    'the private key field is obscured by default and reveals on toggle',
-    (tester) async {
-      await pumpPage(tester);
-
-      final pemField = find.byType(TextField).at(1);
-      expect(tester.widget<TextField>(pemField).obscureText, isTrue);
-
-      await tester.tap(find.byIcon(Icons.visibility));
-      await tester.pumpAndSettle();
-
-      expect(tester.widget<TextField>(pemField).obscureText, isFalse);
-      expect(find.byIcon(Icons.visibility_off), findsOneWidget);
-    },
-  );
-
-  testWidgets('saves the credentials entered by the user', (tester) async {
+  testWidgets('saves the application id with the stored key', (tester) async {
+    store.privateKeyPem = 'STORED-PEM';
     await pumpPage(tester);
 
     await tester.enterText(find.byType(TextField).at(0), 'app-123');
-    await tester.enterText(find.byType(TextField).at(1), 'PEM-CONTENT');
     await tester.tap(find.text('SAVE CREDENTIALS'));
     await tester.pumpAndSettle();
 
     expect(store.appId, 'app-123');
-    expect(store.privateKeyPem, 'PEM-CONTENT');
+    expect(store.privateKeyPem, 'STORED-PEM');
     expect(store.config?.environment, EnableBankingEnvironment.production);
     expect(find.text('Credentials saved'), findsOneWidget);
   });
@@ -164,10 +147,10 @@ void main() {
   testWidgets('stores the sandbox environment when the switch is on', (
     tester,
   ) async {
+    store.privateKeyPem = 'STORED-PEM';
     await pumpPage(tester);
 
     await tester.enterText(find.byType(TextField).at(0), 'app-123');
-    await tester.enterText(find.byType(TextField).at(1), 'PEM-CONTENT');
     // The environment card sits below the fold on the test viewport.
     await tester.ensureVisible(find.byType(Switch));
     await tester.pumpAndSettle();
@@ -182,7 +165,6 @@ void main() {
   testWidgets('refuses to save without an application id', (tester) async {
     await pumpPage(tester);
 
-    await tester.enterText(find.byType(TextField).at(1), 'PEM-CONTENT');
     await tester.tap(find.text('SAVE CREDENTIALS'));
     await tester.pumpAndSettle();
 
@@ -193,11 +175,22 @@ void main() {
     );
   });
 
+  testWidgets('asks to generate a key before saving', (tester) async {
+    await pumpPage(tester);
+
+    await tester.enterText(find.byType(TextField).at(0), 'app-123');
+    await tester.tap(find.text('SAVE CREDENTIALS'));
+    await tester.pumpAndSettle();
+
+    expect(store.appId, isNull);
+    expect(find.text('Generate a key and certificate first'), findsOneWidget);
+  });
+
   testWidgets('refuses to save an unparsable private key', (tester) async {
+    store.privateKeyPem = 'INVALID-STORED-PEM';
     await pumpPage(tester, keyIsValid: false);
 
     await tester.enterText(find.byType(TextField).at(0), 'app-123');
-    await tester.enterText(find.byType(TextField).at(1), 'not-a-key');
     await tester.tap(find.text('SAVE CREDENTIALS'));
     await tester.pumpAndSettle();
 
@@ -206,7 +199,32 @@ void main() {
   });
 
   group('generating a key in-app', () {
-    testWidgets('stores the generated key and shows the pending banner', (
+    testWidgets(
+      'stores the key and shows certificate actions without opening it',
+      (tester) async {
+        await pumpPage(tester);
+
+        await tester.ensureVisible(find.text('Generate new key & certificate'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Generate new key & certificate'));
+        await tester.pumpAndSettle();
+
+        expect(store.privateKeyPem, 'GENERATED-PEM');
+        expect(
+          find.text(
+            'Key generated — upload the certificate from step 2, then enter '
+            'your app_id in step 3 below',
+          ),
+          findsOneWidget,
+        );
+        expect(find.text('Certificate ready'), findsOneWidget);
+        expect(find.text('Copy certificate'), findsOneWidget);
+        expect(find.text('View certificate'), findsOneWidget);
+        expect(find.text('GENERATED-CERT'), findsNothing);
+      },
+    );
+
+    testWidgets('opens the generated certificate only when requested', (
       tester,
     ) async {
       await pumpPage(tester);
@@ -216,22 +234,44 @@ void main() {
       await tester.tap(find.text('Generate new key & certificate'));
       await tester.pumpAndSettle();
 
-      expect(store.privateKeyPem, 'GENERATED-PEM');
-      expect(
-        find.text(
-          'Key generated — upload the certificate to Enable Banking, then '
-          'enter your app_id below',
-        ),
-        findsOneWidget,
+      await tester.ensureVisible(find.text('View certificate'));
+      await tester.tap(find.text('View certificate'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('GENERATED-CERT'), findsOneWidget);
+      expect(find.text('Save to file'), findsOneWidget);
+    });
+
+    testWidgets('copies the generated certificate from the ready panel', (
+      tester,
+    ) async {
+      String? copiedText;
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+        if (call.method == 'Clipboard.setData') {
+          copiedText =
+              (call.arguments as Map<Object?, Object?>)['text'] as String?;
+        }
+        return null;
+      });
+      addTearDown(
+        () => messenger.setMockMethodCallHandler(SystemChannels.platform, null),
       );
-      expect(
-        find.text(
-          'Key generated. Upload the certificate you just saved to your '
-          'Enable Banking application, then paste the app_id below and '
-          'save.',
-        ),
-        findsOneWidget,
-      );
+
+      await pumpPage(tester);
+
+      await tester.ensureVisible(find.text('Generate new key & certificate'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Generate new key & certificate'));
+      await tester.pumpAndSettle();
+
+      await tester.ensureVisible(find.text('Copy certificate'));
+      await tester.tap(find.text('Copy certificate'));
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.text('Certificate copied'), findsOneWidget);
+      expect(copiedText, 'GENERATED-CERT');
     });
 
     testWidgets('asks for confirmation before replacing an existing key', (
@@ -290,13 +330,12 @@ void main() {
       expect(find.text('saved-app'), findsOneWidget);
       expect(find.text('Credentials configured'), findsOneWidget);
       expect(find.text('Clear credentials'), findsOneWidget);
-      // The key is never read back into the form.
       expect(find.text('SAVED-PEM'), findsNothing);
-      expect(find.text('•••• configured'), findsOneWidget);
+      expect(find.text('Import from file'), findsNothing);
       expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
     });
 
-    testWidgets('keeps the stored key when the field is left empty', (
+    testWidgets('keeps the stored key when changing the application id', (
       tester,
     ) async {
       await pumpPage(tester);
@@ -337,11 +376,12 @@ void main() {
         await tester.pumpAndSettle();
         await tester.tap(find.text('Generate new key & certificate'));
         await tester.pumpAndSettle();
+        await tester.tap(find.text('Generate'));
+        await tester.pumpAndSettle();
 
         expect(store.appId, isNull);
         expect(store.config, isNull);
-        // The key just written by the generator must survive clearing the
-        // stale app_id/config tied to the previous certificate.
+        // New key must survive the old app_id/config being cleared.
         expect(store.privateKeyPem, 'GENERATED-PEM');
       },
     );

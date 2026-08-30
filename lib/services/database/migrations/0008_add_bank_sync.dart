@@ -45,9 +45,8 @@ class AddBankSync extends Migration {
       'ALTER TABLE `$transactionTable` ADD COLUMN ${TransactionFields.externalId} TEXT',
     );
 
-    // UNIQUE as a DB-level backstop for the check-then-insert dedup in
-    // TransactionsRepository.insertMissing: SQLite treats each NULL as
-    // distinct, so manual transactions (externalId IS NULL) are unaffected.
+    // UNIQUE backstop for dedup; SQLite treats each NULL as distinct, so
+    // manual transactions (externalId IS NULL) are unaffected
     await db.execute(
       'CREATE UNIQUE INDEX idx_transaction_external ON `$transactionTable` '
       '(${TransactionFields.idBankAccount}, ${TransactionFields.externalId})',

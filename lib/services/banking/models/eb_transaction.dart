@@ -6,7 +6,6 @@ DateTime? _parseDate(Object? value) {
   return DateTime.tryParse(value as String);
 }
 
-/// A single transaction as returned by `GET /accounts/{uid}/transactions`.
 class EbTransaction {
   final String? entryReference;
   final String? transactionId;
@@ -36,11 +35,8 @@ class EbTransaction {
     this.note,
   });
 
-  /// Throws [EnableBankingException] (not a raw [TypeError]/[FormatException])
-  /// when a required field is missing or of an unexpected type — the ASPSP
-  /// occasionally sends a malformed transaction that would otherwise crash
-  /// parsing of the whole page (see [EbTransactionsPage.fromJson], which
-  /// catches this to skip just the one bad transaction).
+  // Wrap parse errors so callers get EnableBankingException instead of a
+  // raw TypeError/FormatException.
   static EbTransaction fromJson(Map<String, dynamic> json) {
     try {
       return EbTransaction(
@@ -71,24 +67,12 @@ class EbTransaction {
     }
   }
 
-  /// Signed amount: positive for credits (`CRDT`), negative otherwise.
-  ///
-  /// Anything that is not `CRDT` (e.g. `DBIT`/`DBDT`) is treated as an outflow.
   num get signedAmount => creditDebitIndicator == 'CRDT'
       ? transactionAmount.amount
       : -transactionAmount.amount;
 
-  /// Stable dedup key: `entry_reference` when present, else `transaction_id`,
-  /// else a composite of date/amount/direction/description.
-  ///
-  /// Not every ASPSP populates either bank-provided id (observed in
-  /// production with at least one ASPSP) — without this fallback,
-  /// `TransactionsRepository.insertMissing` has nothing to dedup against and
-  /// re-inserts the same transaction on every re-sync. The composite key is
-  /// a best effort, not a guarantee: two genuinely distinct transactions
-  /// with identical date/amount/direction/description on the same account
-  /// would collide and the second be skipped as a false duplicate — a
-  /// safer failure mode than unbounded duplication.
+  // Falls back to a composite key when the ASPSP sends neither
+  // entry_reference nor transaction_id, so re-syncs can still dedup.
   String? get stableId {
     if (entryReference != null) return entryReference;
     if (transactionId != null) return transactionId;

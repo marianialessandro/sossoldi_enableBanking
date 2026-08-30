@@ -3,8 +3,7 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sossoldi/services/banking/enable_banking_deeplink_service.dart';
 
-/// Stands in for `app_links`: links are pushed by the test instead of
-/// arriving from the platform channel.
+// Fakes `app_links`: the test pushes links instead of the platform channel.
 class _FakeUriLinkSource implements UriLinkSource {
   final StreamController<Uri> controller = StreamController<Uri>.broadcast();
   Uri? initialUri;

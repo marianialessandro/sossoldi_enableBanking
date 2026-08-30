@@ -6,9 +6,6 @@ import 'package:path/path.dart';
 
 import '../../ui/snack_bars/snack_bar.dart';
 
-/// Exports a freshly generated Enable Banking certificate to a file the
-/// user picks a folder for, so they can upload it to the Enable Banking
-/// control panel. Mirrors `CSVFilePicker.saveCSVFile`.
 class EnableBankingCertificateFilePicker {
   static Future<String?> saveCertificateFile(
     String certificatePem,
@@ -17,7 +14,6 @@ class EnableBankingCertificateFilePicker {
     try {
       final selectedDirectory = await FilePicker.platform.getDirectoryPath();
       if (selectedDirectory == null) {
-        // User canceled the picker
         return null;
       }
 

@@ -16,9 +16,6 @@ import 'models/eb_transactions_page.dart';
 
 const _kBaseUrl = 'https://api.enablebanking.com';
 
-/// Applied to every request so a stuck ASPSP/API endpoint fails fast
-/// instead of leaving the caller (e.g. a manual sync button) hanging
-/// indefinitely.
 const _kRequestTimeout = Duration(seconds: 30);
 
 String _formatDate(DateTime date) {
@@ -29,11 +26,6 @@ String _formatDate(DateTime date) {
   return '$year-$month-$day';
 }
 
-/// Thin REST client for the Enable Banking API.
-///
-/// Every request is authenticated with a fresh RS256 JWT (via [_auth]) and
-/// mapped onto the DTOs in `models/`; HTTP errors (status >= 400) become
-/// [EnableBankingException].
 class EnableBankingApi {
   final EnableBankingAuth _auth;
   final EnableBankingCredentialsStore _store;
@@ -41,8 +33,6 @@ class EnableBankingApi {
 
   final Duration _requestTimeout;
 
-  /// [requestTimeout] defaults to the production value; only overridden in
-  /// tests to make timeout handling verifiable without a real 30s wait.
   EnableBankingApi({
     required EnableBankingAuth auth,
     required EnableBankingCredentialsStore store,
@@ -75,11 +65,8 @@ class EnableBankingApi {
     );
   }
 
-  /// Runs [request], converting a timed out or dropped connection into an
-  /// [EnableBankingException] (`statusCode: null`) instead of letting a raw
-  /// `TimeoutException`/`SocketException` escape. Every call site that
-  /// already handles `EnableBankingException` (nearly all of them) then
-  /// covers these cases too, without needing its own generic `catch`.
+  // Converts a timeout or dropped connection into an EnableBankingException
+  // so callers only need to handle one error type.
   Future<http.Response> _send(Future<http.Response> Function() request) async {
     try {
       return await request().timeout(_requestTimeout);
@@ -90,9 +77,8 @@ class EnableBankingApi {
     }
   }
 
-  /// Same rationale as [_send]: a non-JSON body (e.g. an HTML error page
-  /// from a proxy/CDN in front of the API) becomes an
-  /// [EnableBankingException] instead of a raw `FormatException`.
+  // Same rationale as _send: a non-JSON body becomes an
+  // EnableBankingException instead of a raw FormatException.
   Map<String, dynamic> _decode(String body) {
     try {
       return jsonDecode(body) as Map<String, dynamic>;

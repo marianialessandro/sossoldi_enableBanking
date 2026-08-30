@@ -150,7 +150,6 @@ void main() {
 
       expect(debit.signedAmount, -25.00);
       expect(debit.creditDebitIndicator, 'DBIT');
-      // entry_reference is null → stableId falls back to transaction_id.
       expect(debit.stableId, 'tx-002');
       expect(debit.isBooked, isFalse);
       expect(debit.bookingDate, isNull);
@@ -167,11 +166,7 @@ void main() {
             'transaction_amount': {'amount': '5.00', 'currency': 'EUR'},
             'credit_debit_indicator': 'CRDT',
           },
-          {
-            'entry_reference': 'ref-bad',
-            'status': 'BOOK',
-            // Missing transaction_amount and credit_debit_indicator.
-          },
+          {'entry_reference': 'ref-bad', 'status': 'BOOK'},
         ],
       });
 

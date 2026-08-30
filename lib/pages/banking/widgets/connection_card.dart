@@ -17,8 +17,6 @@ import '../../../ui/widgets/default_card.dart';
 import '../../../ui/widgets/rounded_icon.dart';
 import 'confirm_disconnect_dialog.dart';
 
-/// One linked bank: how many accounts it feeds, until when the consent is
-/// valid and the actions available on it.
 class ConnectionCard extends ConsumerStatefulWidget {
   const ConnectionCard({required this.connection, super.key});
 
@@ -208,7 +206,6 @@ class _ConnectionCardState extends ConsumerState<ConnectionCard> {
     );
   }
 
-  /// Most recent sync across the accounts fed by this connection.
   String _lastSyncLabel(List<BankAccount> linked) {
     final syncs = linked.map((account) => account.lastSyncAt).nonNulls.toList()
       ..sort();

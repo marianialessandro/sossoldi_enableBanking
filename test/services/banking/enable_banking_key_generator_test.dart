@@ -5,9 +5,7 @@ import 'package:sossoldi/services/banking/enable_banking_key_generator.dart';
 
 const _testAppId = 'test-app-id';
 
-// A small (but still supported) key size keeps this test fast; production
-// always calls generateEnableBankingKeyMaterial with kEnableBankingKeySize
-// (4096).
+// A small key size keeps the test fast; production uses 4096-bit keys.
 const _testKeySize = 1024;
 
 void main() {

@@ -100,11 +100,7 @@ class BankConnectionRepository {
     );
   }
 
-  /// Unlinks every account fed by [connectionId] and marks the connection
-  /// `revoked`, atomically: a failure partway through (e.g. a transient DB
-  /// write error) must not leave some accounts unlinked while others — or
-  /// the connection itself — still point at a connection the user just
-  /// disconnected.
+  // Unlinks the accounts and marks the connection revoked atomically
   Future<void> finalizeDisconnect(int connectionId) async {
     final db = await _sossoldiDB.database;
 

@@ -7,8 +7,6 @@ const _kAudience = 'api.enablebanking.com';
 const _kMaxTtl = Duration(hours: 24);
 const _kRefreshMargin = Duration(minutes: 5);
 
-/// Thrown when the Enable Banking JWT cannot be built: an unparsable private
-/// key PEM or missing BYOC credentials.
 class EnableBankingAuthException implements Exception {
   final String message;
 
@@ -18,9 +16,8 @@ class EnableBankingAuthException implements Exception {
   String toString() => 'EnableBankingAuthException: $message';
 }
 
-/// Signs Enable Banking API requests with an RS256 JWT built from the
-/// user's BYOC `app_id` + private key, on-device. The signed token is only
-/// ever cached in memory (never persisted) and reused until close to expiry.
+// Signs requests with an RS256 JWT built from the user's BYOC key,
+// on-device; the signed token is cached in memory only, never persisted.
 class EnableBankingAuth {
   final Duration _tokenTtl;
   final Duration _refreshMargin;
@@ -29,9 +26,6 @@ class EnableBankingAuth {
   String? _cachedToken;
   DateTime? _cachedExpiry;
 
-  /// [tokenTtl] and [refreshMargin] default to the production values; they
-  /// (and [now]) are only overridden in tests to make cache expiry
-  /// deterministic without real waiting.
   EnableBankingAuth({
     Duration tokenTtl = const Duration(hours: 1),
     Duration refreshMargin = _kRefreshMargin,
@@ -40,7 +34,6 @@ class EnableBankingAuth {
        _refreshMargin = refreshMargin,
        _now = now;
 
-  /// Builds and signs a new RS256 JWT for the Enable Banking API.
   String buildJwt({
     required String appId,
     required String privateKeyPem,
@@ -67,8 +60,6 @@ class EnableBankingAuth {
     }
   }
 
-  /// Returns a cached token while it still has more than [_refreshMargin]
-  /// left before expiry, otherwise signs and caches a fresh one.
   Future<String> getValidToken(EnableBankingCredentialsStore store) async {
     final now = _now();
     final cachedExpiry = _cachedExpiry;
@@ -96,9 +87,8 @@ class EnableBankingAuth {
     return token;
   }
 
-  /// Drops the cached token. Must be called whenever the underlying
-  /// credentials are cleared or regenerated, otherwise a still-valid cached
-  /// token keeps authenticating with credentials the user just revoked.
+  // Must be called when credentials are cleared or regenerated, otherwise a
+  // still-cached token keeps authenticating with revoked credentials.
   void invalidate() {
     _cachedToken = null;
     _cachedExpiry = null;

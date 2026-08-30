@@ -106,12 +106,7 @@ class Launcher extends ConsumerWidget {
     final appThemeState = ref.watch(appThemeStateProvider);
     final bool isOnboardingCompleted = ref.watch(onBoardingCompletedProvider);
 
-    // Starts capturing the Enable Banking OAuth callback deep link (cold
-    // start included) and reports authorization failures wherever the user
-    // is: the connect-bank screens react to the success case themselves.
-    // Resets the provider right after, same as the success path in
-    // connect_bank_page.dart, so a leftover errorMessage doesn't linger
-    // into the next attempt.
+    // App-level so a cold-start deep-link error still surfaces.
     ref.listen(bankCallbackHandlerProvider, (previous, next) {
       final message = next.errorMessage;
       if (message != null && message != previous?.errorMessage) {
@@ -120,12 +115,7 @@ class Launcher extends ConsumerWidget {
       }
     });
 
-    // Kicks off the once-a-day background bank sync (if due) through this
-    // same container's ref, so it can invalidate the providers the rest of
-    // the UI already watches once it's done. keepAlive + read (not watch):
-    // this must run once per app session, not on every rebuild, and its
-    // completion is picked up via the providers it invalidates, not by
-    // rebuilding this widget.
+    // read (not watch): must run once per session, not per rebuild.
     ref.read(bankAutoSyncProvider);
 
     return MaterialApp(

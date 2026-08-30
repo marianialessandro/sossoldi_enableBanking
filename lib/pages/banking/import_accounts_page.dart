@@ -11,7 +11,6 @@ import '../../ui/widgets/alert_dialog.dart';
 import '../../ui/widgets/default_container.dart';
 import 'widgets/account_import_tile.dart';
 
-/// How the user wants one bank account to land in the app.
 class _ImportDraft {
   _ImportDraft({required this.account, required this.nameController});
 
@@ -22,8 +21,6 @@ class _ImportDraft {
   int color = 0;
 }
 
-/// Last leg of the connect flow: pick which accounts of the freshly linked
-/// bank become app accounts, and how they look.
 class ImportAccountsPage extends ConsumerStatefulWidget {
   const ImportAccountsPage({super.key});
 
@@ -77,10 +74,7 @@ class _ImportAccountsPageState extends ConsumerState<ImportAccountsPage> {
                     : draft.nameController.text.trim(),
                 symbol: draft.symbol,
                 color: draft.color,
-                // Waits for the balance fetch instead of reading whatever
-                // value happened to be cached so far: a balance that hasn't
-                // resolved yet must never silently import as a 0 starting
-                // value.
+                // Await the fetch: an unresolved balance must not import as 0.
                 startingValue:
                     await ref.read(
                       ebAccountBalanceProvider(draft.account.uid).future,
@@ -90,8 +84,7 @@ class _ImportAccountsPageState extends ConsumerState<ImportAccountsPage> {
           ]);
       if (!mounted) return;
 
-      // The snack bar goes through the root messenger: this route is about
-      // to be popped, so its own context cannot show anything.
+      // Root messenger: this route is about to be popped.
       Navigator.popUntil(context, ModalRoute.withName('/connect-bank'));
       showRootSnackBar(
         message:

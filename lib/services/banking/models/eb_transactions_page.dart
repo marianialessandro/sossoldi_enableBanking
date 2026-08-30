@@ -3,9 +3,6 @@ import 'dart:developer' as developer;
 import '../enable_banking_exception.dart';
 import 'eb_transaction.dart';
 
-/// Paginated envelope from `GET /accounts/{uid}/transactions`.
-///
-/// [continuationKey] is echoed back on the next request to fetch more pages.
 class EbTransactionsPage {
   final List<EbTransaction> transactions;
   final String? continuationKey;
@@ -15,9 +12,7 @@ class EbTransactionsPage {
     this.continuationKey,
   });
 
-  /// A single malformed transaction (see [EbTransaction.fromJson]) is
-  /// logged and dropped rather than failing the whole page: the other,
-  /// valid transactions on the same page/account must still be synced.
+  // Skip malformed transactions instead of failing the whole page.
   static EbTransactionsPage fromJson(Map<String, dynamic> json) {
     final raw = (json['transactions'] as List?) ?? const [];
     final transactions = <EbTransaction>[];

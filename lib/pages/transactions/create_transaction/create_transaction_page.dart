@@ -102,8 +102,7 @@ class _CreateTransactionPage extends ConsumerState<CreateTransactionPage> {
     final selectedAccountTransfer =
         ref.read(bankAccountTransferProvider) != null;
     final selectedCategory = ref.read(selectedCategoryProvider) != null;
-    // A reconciliation adjustment has no category and its picker is
-    // hidden, so it can't be required to enable saving.
+    // Reconciliation has no category, so it can't be required to save.
     final isReconciliation = widget.transaction?.isReconciliation ?? false;
     setState(() {
       _isSaveEnabled = amountController.text.isNotEmpty && selectedAccount;
@@ -209,12 +208,6 @@ class _CreateTransactionPage extends ConsumerState<CreateTransactionPage> {
   Widget build(BuildContext context) {
     final selectedType = ref.watch(selectedTransactionTypeProvider);
 
-    // A reconciliation adjustment (AccountsProvider._reconcileAccount) has
-    // no category, is never recurring, and its amount/type/date are fixed
-    // by the balance difference at the moment it was created. A
-    // bank-imported transaction (Enable Banking) has its account, date and
-    // income/expense type fixed by the bank's own record, and can't be
-    // made recurring either.
     final isReconciliation = widget.transaction?.isReconciliation ?? false;
     final isBankImported = widget.transaction?.isBankImported ?? false;
     final canEditCategory = !isReconciliation;
@@ -233,11 +226,7 @@ class _CreateTransactionPage extends ConsumerState<CreateTransactionPage> {
               : "New transaction",
         ),
         actions: [
-          // A bank-imported transaction is the bank's own record: duplicating
-          // it would create an untracked manual copy, and deleting it would
-          // just reappear on the next sync (insertMissing dedups on
-          // externalId, it doesn't know about local deletions) — hide both
-          // actions instead of offering something that can't work as expected.
+          // Bank-imported transactions can't be duplicated or deleted.
           if (widget.transaction != null && !isBankImported) ...[
             IconButton(
               icon: Icon(

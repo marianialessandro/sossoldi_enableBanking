@@ -52,9 +52,7 @@ void main() {
       final inserted = await accountRepository.insert(
         linkedAccount(name: 'Checking', ebUid: 'acc-1'),
       );
-      // deleteById relies on createdAt already being set, as it always is
-      // on an account round-tripped through the DB (insert() itself echoes
-      // back the argument it was given, without createdAt).
+      // insert() omits createdAt; deleteById needs it, so refetch first.
       final account = await accountRepository.selectById(inserted.id!);
 
       await accountRepository.deleteById(account);

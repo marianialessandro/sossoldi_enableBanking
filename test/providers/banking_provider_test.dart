@@ -22,19 +22,14 @@ import 'package:sossoldi/services/database/repositories/bank_connection_reposito
 import 'package:sossoldi/services/database/repositories/transactions_repository.dart';
 import 'package:sossoldi/services/database/sossoldi_database.dart';
 
-/// Bypasses credential/JWT signing entirely: the API client only needs a
-/// valid bearer token string, not a real signature.
+// Bypasses JWT signing: the client only needs a bearer token string.
 class _FakeAuth extends EnableBankingAuth {
   @override
   Future<String> getValidToken(EnableBankingCredentialsStore store) async =>
       'test-token';
 }
 
-/// Simulates credentials disappearing between starting the OAuth flow and
-/// the callback landing (e.g. the browser consent screen still open while
-/// the user clears credentials in the app): the first getValidToken call
-/// (startConnection's own request) succeeds, every one after that (the
-/// callback's completeConnection) fails.
+// Simulates credentials vanishing mid-OAuth: first call succeeds, rest fail.
 class _ThrowingAuth extends EnableBankingAuth {
   int calls = 0;
 
@@ -46,8 +41,7 @@ class _ThrowingAuth extends EnableBankingAuth {
   }
 }
 
-/// Keeps [EnableBankingSettings] off the real secure storage platform
-/// channel, which isn't available in these plain (non-widget) tests.
+// Keeps credentials off secure storage; unavailable in tests.
 class _FakeCredentialsStore extends EnableBankingCredentialsStore {
   _FakeCredentialsStore({this.config});
 
@@ -60,10 +54,8 @@ class _FakeCredentialsStore extends EnableBankingCredentialsStore {
   Future<bool> hasCredentials() async => config != null;
 }
 
-/// In-memory stand-in for [BankConnectionRepository]: the `database` passed
-/// to `super` is never touched because every method used by the flow is
-/// overridden below. [accountRepository] mirrors the real
-/// `finalizeDisconnect`'s cross-table reach into `bankAccount`.
+// In-memory BankConnectionRepository; overridden methods avoid the real
+// database.
 class _FakeBankConnectionRepository extends BankConnectionRepository {
   _FakeBankConnectionRepository({required this.accountRepository})
     : super(database: SossoldiDatabase());
@@ -118,7 +110,7 @@ class _FakeBankConnectionRepository extends BankConnectionRepository {
   }
 }
 
-/// In-memory stand-in for [AccountRepository], same rationale as above.
+// In-memory stand-in for AccountRepository, same rationale as above.
 class _FakeAccountRepository extends AccountRepository {
   _FakeAccountRepository() : super(database: SossoldiDatabase());
 
@@ -174,8 +166,7 @@ class _FakeAccountRepository extends AccountRepository {
   }
 }
 
-/// In-memory stand-in for [TransactionsRepository]: `importAccounts` now
-/// syncs the fresh connection immediately, which reaches this repository.
+// In-memory TransactionsRepository; importAccounts now syncs on connect.
 class _FakeTransactionsRepository extends TransactionsRepository {
   _FakeTransactionsRepository() : super(database: SossoldiDatabase());
 
@@ -183,8 +174,7 @@ class _FakeTransactionsRepository extends TransactionsRepository {
   Future<int> insertMissing(List<Transaction> items) async => items.length;
 }
 
-/// Feeds deep links to [EnableBankingDeeplinkService] without going through
-/// the `app_links` platform channel.
+// Feeds deep links to EnableBankingDeeplinkService without `app_links`.
 class _FakeUriLinkSource implements UriLinkSource {
   final StreamController<Uri> controller = StreamController<Uri>.broadcast();
 
@@ -231,9 +221,8 @@ void main() {
     sharedPreferences = await SharedPreferences.getInstance();
   });
 
-  // Nullable with a non-null default: most tests want a config in place and
-  // rely on the default, but bankAutoSyncProvider's "no credentials" case
-  // needs to pass an explicit `null` through to the fake store.
+  // Nullable with a non-null default so bankAutoSyncProvider's "no
+  // credentials" case can pass an explicit `null` to the fake store.
   ProviderContainer buildContainer(
     MockClientHandler handler, {
     EnableBankingConfig? config = const EnableBankingConfig(appId: 'app-1'),
@@ -477,9 +466,7 @@ void main() {
         const Aspsp(name: 'Old Bank', country: 'IT'),
         reconnecting: existing,
       );
-      // A brand new connect flow started afterwards (e.g. the user backs
-      // out and links a different bank) must not keep reconnecting into
-      // the old one.
+      // A fresh flow afterwards must not keep reconnecting into the old one.
       await notifier.startConnection(
         const Aspsp(name: 'New Bank', country: 'IT'),
       );
@@ -745,12 +732,14 @@ void main() {
 
         await container.read(bankAutoSyncProvider.future);
 
-        // A fresh read must trigger a new selectAll() call instead of
-        // returning the stale cached value.
+        // A fresh read must force a new selectAll(), not the stale value.
         await container.read(bankConnectionsProvider.future);
         expect(connectionRepository.selectAllCalls, 2);
 
-        expect(sharedPreferences.getString('last_bank_sync_check'), isNotNull);
+        expect(
+          sharedPreferences.getString('last_bank_sync_check_v2'),
+          isNotNull,
+        );
       },
     );
 
@@ -774,7 +763,7 @@ void main() {
 
       await container.read(bankAutoSyncProvider.future);
 
-      expect(sharedPreferences.getString('last_bank_sync_check'), isNull);
+      expect(sharedPreferences.getString('last_bank_sync_check_v2'), isNull);
       // No invalidation happened: still cached, no new selectAll() call.
       await container.read(bankConnectionsProvider.future);
       expect(connectionRepository.selectAllCalls, 1);
@@ -782,7 +771,7 @@ void main() {
 
     test('does not run again the same day', () async {
       await sharedPreferences.setString(
-        'last_bank_sync_check',
+        'last_bank_sync_check_v2',
         DateTime.now().toIso8601String(),
       );
       container = buildContainer(

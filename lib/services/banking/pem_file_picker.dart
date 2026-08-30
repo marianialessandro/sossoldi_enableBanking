@@ -7,11 +7,7 @@ import 'package:permission_handler/permission_handler.dart';
 
 import '../../ui/snack_bars/snack_bar.dart';
 
-/// Picks the RSA private key of the user's Enable Banking application from
-/// local storage. Mirrors `CSVFilePicker`, including the storage permission
-/// dance needed on Android 12 and older.
 class PemFilePicker {
-  // Request storage permission based on Android version
   static Future<bool> _requestStoragePermission() async {
     if (Platform.isAndroid) {
       final androidInfo = await DeviceInfoPlugin().androidInfo;
@@ -25,7 +21,6 @@ class PemFilePicker {
     return true;
   }
 
-  // Pick the PEM file holding the application private key
   static Future<File?> pickPemFile(BuildContext context) async {
     bool permissionGranted = await _requestStoragePermission();
     if (!permissionGranted) {

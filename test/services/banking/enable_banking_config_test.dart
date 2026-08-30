@@ -26,6 +26,16 @@ void main() {
       expect(config.defaultCountry, isNull);
     });
 
+    test('migrates the legacy hosted redirect URI', () {
+      final config = EnableBankingConfig.fromJson({
+        'app_id': 'app-1',
+        'redirect_uri':
+            'https://marianialessandro.com/sossoldi/eb-callback.html',
+      });
+
+      expect(config.redirectUri, kEbRedirectUri);
+    });
+
     test('throws EnableBankingException instead of a raw TypeError when '
         'app_id is missing', () {
       expect(

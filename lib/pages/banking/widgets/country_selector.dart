@@ -1,44 +1,42 @@
+import 'package:country_flags/country_flags.dart';
 import 'package:flutter/material.dart';
 
 import '../../../constants/style.dart';
 import '../../../ui/device.dart';
 
-/// Countries covered by Enable Banking, as `[flag, name, ISO code]` — same
-/// shape as the `languages` table of the general settings page.
-const List<List<String>> kEbCountries = [
-  ["🇦🇹", "Austria", "AT"],
-  ["🇧🇪", "Belgium", "BE"],
-  ["🇧🇬", "Bulgaria", "BG"],
-  ["🇭🇷", "Croatia", "HR"],
-  ["🇨🇾", "Cyprus", "CY"],
-  ["🇨🇿", "Czechia", "CZ"],
-  ["🇩🇰", "Denmark", "DK"],
-  ["🇪🇪", "Estonia", "EE"],
-  ["🇫🇮", "Finland", "FI"],
-  ["🇫🇷", "France", "FR"],
-  ["🇩🇪", "Germany", "DE"],
-  ["🇬🇷", "Greece", "GR"],
-  ["🇭🇺", "Hungary", "HU"],
-  ["🇮🇸", "Iceland", "IS"],
-  ["🇮🇪", "Ireland", "IE"],
-  ["🇮🇹", "Italy", "IT"],
-  ["🇱🇻", "Latvia", "LV"],
-  ["🇱🇮", "Liechtenstein", "LI"],
-  ["🇱🇹", "Lithuania", "LT"],
-  ["🇱🇺", "Luxembourg", "LU"],
-  ["🇲🇹", "Malta", "MT"],
-  ["🇳🇱", "Netherlands", "NL"],
-  ["🇳🇴", "Norway", "NO"],
-  ["🇵🇱", "Poland", "PL"],
-  ["🇵🇹", "Portugal", "PT"],
-  ["🇷🇴", "Romania", "RO"],
-  ["🇸🇰", "Slovakia", "SK"],
-  ["🇸🇮", "Slovenia", "SI"],
-  ["🇪🇸", "Spain", "ES"],
-  ["🇸🇪", "Sweden", "SE"],
+const List<({String name, String code})> kEbCountries = [
+  (name: "Austria", code: "AT"),
+  (name: "Belgium", code: "BE"),
+  (name: "Bulgaria", code: "BG"),
+  (name: "Croatia", code: "HR"),
+  (name: "Cyprus", code: "CY"),
+  (name: "Czechia", code: "CZ"),
+  (name: "Denmark", code: "DK"),
+  (name: "Estonia", code: "EE"),
+  (name: "Finland", code: "FI"),
+  (name: "France", code: "FR"),
+  (name: "Germany", code: "DE"),
+  (name: "Greece", code: "GR"),
+  (name: "Hungary", code: "HU"),
+  (name: "Iceland", code: "IS"),
+  (name: "Ireland", code: "IE"),
+  (name: "Italy", code: "IT"),
+  (name: "Latvia", code: "LV"),
+  (name: "Liechtenstein", code: "LI"),
+  (name: "Lithuania", code: "LT"),
+  (name: "Luxembourg", code: "LU"),
+  (name: "Malta", code: "MT"),
+  (name: "Netherlands", code: "NL"),
+  (name: "Norway", code: "NO"),
+  (name: "Poland", code: "PL"),
+  (name: "Portugal", code: "PT"),
+  (name: "Romania", code: "RO"),
+  (name: "Slovakia", code: "SK"),
+  (name: "Slovenia", code: "SI"),
+  (name: "Spain", code: "ES"),
+  (name: "Sweden", code: "SE"),
 ];
 
-/// Bottom sheet content: pick the country of the bank to connect.
 class CountrySelector extends StatelessWidget {
   const CountrySelector({
     required this.scrollController,
@@ -73,18 +71,19 @@ class CountrySelector extends StatelessWidget {
                     return ListTile(
                       onTap: () {
                         Navigator.pop(context);
-                        onSelected(country[2]);
+                        onSelected(country.code);
                       },
-                      leading: Text(
-                        country[0],
-                        style: const TextStyle(
-                          fontSize: 30,
-                          fontFamilyFallback: kEmojiFontFallback,
+                      leading: CountryFlag.fromCountryCode(
+                        country.code,
+                        theme: const ImageTheme(
+                          width: 32,
+                          height: 24,
+                          shape: RoundedRectangle(4),
                         ),
                       ),
-                      title: Text(country[1]),
+                      title: Text(country.name),
                       trailing: Text(
-                        country[2],
+                        country.code,
                         style: Theme.of(context).textTheme.labelLarge!.copyWith(
                           color: Theme.of(context).colorScheme.primary,
                         ),

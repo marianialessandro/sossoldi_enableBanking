@@ -7,8 +7,7 @@ import 'package:sossoldi/services/banking/enable_banking_credentials_store.dart'
 
 const _testAppId = 'test-app-id';
 
-// Test-only RSA key pair (2048 bit), generated locally with openssl. Not
-// used anywhere outside this test.
+// Test-only RSA key pair (openssl); not used outside this test.
 const _testPrivateKeyPem = '''-----BEGIN PRIVATE KEY-----
 MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCK8tcYKu5wY289
 mQaXvehFJDyUnWxIKaKPNa+Vj1HV+mYtciLBBvLFjXmG8av4FFSctXNHSlkBDhjY
@@ -48,9 +47,7 @@ LOLj90CNOeLYlnqRyZTi/CbEL5QYvEwxrks88YCcuuyRtWuOR2YoD1MEA/r4hAZV
 xQIDAQAB
 -----END PUBLIC KEY-----''';
 
-/// Spies on how many times credentials are fetched from the store, so tests
-/// can assert whether [EnableBankingAuth] reused its in-memory cache or
-/// signed a fresh token.
+// Counts calls to readConfig, so tests can assert cache reuse vs re-signing.
 class _CountingCredentialsStore extends EnableBankingCredentialsStore {
   int readConfigCalls = 0;
 
@@ -87,7 +84,7 @@ void main() {
       expect(exp - iat, greaterThan(0));
       expect(exp - iat, lessThanOrEqualTo(ttl.inSeconds));
 
-      // Signature must verify against the matching public key.
+      // Proves the token was signed with the matching private key.
       final verified = JWT.verify(token, RSAPublicKey(_testPublicKeyPem));
       expect(verified.payload['iss'], 'enablebanking.com');
     });

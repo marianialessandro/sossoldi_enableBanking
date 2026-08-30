@@ -3,9 +3,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sossoldi/main.dart' as app;
+import 'package:sossoldi/services/banking/enable_banking_config.dart';
 
-/// Throwaway RSA key generated for this test only: it must be parsable so
-/// the setup page accepts it, but it is not registered anywhere.
+// Throwaway key: parsable so setup accepts it, but not registered anywhere.
 const _testPem = '''-----BEGIN PRIVATE KEY-----
 MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCSFvnfP7nAaqaF
 v25mXIaHNRGN1sSp9MNC5Hb4uRi66nZcVPLR/Lcbpv+LhZSEEC/VC9gMb3UWBi7M
@@ -39,17 +39,15 @@ void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
   Future<void> startApp(WidgetTester tester) async {
-    // A fresh install lands on the onboarding: the banking screens are
-    // reached from the app itself, so start past it.
+    // Skip onboarding: banking screens are reached from within the app.
     SharedPreferences.setMockInitialValues({'onboarding_completed': true});
     app.main();
     await tester.pump(const Duration(seconds: 2));
     await tester.pumpAndSettle(const Duration(seconds: 1));
   }
 
-  /// Holds the current screen long enough for the host to grab it with
-  /// `xcrun simctl io screenshot`: the driver side screenshot API is not
-  /// reliable on the iOS simulator.
+  // Holds the screen long enough for `xcrun simctl io screenshot`: the
+  // driver-side screenshot API isn't reliable on the iOS simulator.
   Future<void> shot(WidgetTester tester, String name) async {
     debugPrint('SHOT $name');
     await tester.runAsync(() => Future.delayed(const Duration(seconds: 3)));
@@ -62,12 +60,18 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Bank sync'));
     await tester.pumpAndSettle();
+
+    expect(find.text('Configure Enable Banking'), findsOneWidget);
+    expect(find.text('Connect banks'), findsOneWidget);
+
+    await tester.tap(find.text('Configure Enable Banking'));
+    await tester.pumpAndSettle();
   }
 
   Future<void> saveCredentials(WidgetTester tester) async {
-    await tester.enterText(find.byType(TextField).at(0), 'test-app-id');
+    await tester.enterText(find.byType(TextField).at(0), _testPem);
     await tester.pumpAndSettle();
-    await tester.enterText(find.byType(TextField).at(1), _testPem);
+    await tester.enterText(find.byType(TextField).at(1), 'test-app-id');
     await tester.pumpAndSettle();
     await tester.tap(find.text('SAVE CREDENTIALS'));
     await tester.pumpAndSettle();
@@ -77,12 +81,12 @@ void main() {
     await startApp(tester);
     await openBankSync(tester);
 
-    expect(find.text('APPLICATION ID'), findsOneWidget);
-    expect(find.text('sossoldi://eb-callback'), findsOneWidget);
+    expect(find.text('Enter your application ID'), findsOneWidget);
+    expect(find.text(kEbRedirectUri), findsOneWidget);
     await shot(tester, '01_setup_empty');
 
-    await tester.enterText(find.byType(TextField).at(0), 'test-app-id');
-    await tester.enterText(find.byType(TextField).at(1), 'not-a-real-key');
+    await tester.enterText(find.byType(TextField).at(0), 'not-a-real-key');
+    await tester.enterText(find.byType(TextField).at(1), 'test-app-id');
     await tester.pumpAndSettle();
     await tester.tap(find.text('SAVE CREDENTIALS'));
     await tester.pumpAndSettle();
@@ -110,11 +114,10 @@ void main() {
     expect(find.text('Clear credentials'), findsOneWidget);
     await shot(tester, '04_setup_configured');
 
-    // Leaving and re-entering proves the credentials survive in the
-    // keychain, not just in the page state.
+    // Proves credentials survive in the keychain, not just in page state.
     await tester.tap(find.byIcon(Icons.arrow_back_ios_new).first);
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Bank sync'));
+    await tester.tap(find.text('Configure Enable Banking'));
     await tester.pumpAndSettle();
 
     expect(find.text('Credentials configured'), findsOneWidget);
@@ -144,8 +147,7 @@ void main() {
     await tester.tap(find.text('Austria'));
     await tester.pumpAndSettle(const Duration(seconds: 5));
 
-    // Without a registered application the API rejects the token: what we
-    // check here is that the failure is reported instead of hanging.
+    // No registered app: token is rejected; check failure shows, not a hang.
     expect(find.text('Bank'), findsOneWidget);
     await shot(tester, '07_aspsp_sheet');
   });
@@ -157,8 +159,7 @@ void main() {
     await tester.scrollUntilVisible(
       find.text('Clear credentials'),
       200,
-      // The page has more than one Scrollable (the body and the colour
-      // picker rows), so the body has to be named explicitly.
+      // Multiple Scrollables (body, colour picker): name body explicitly.
       scrollable: find.byType(Scrollable).first,
     );
     await tester.pumpAndSettle();
@@ -194,6 +195,8 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Bank sync'));
     await tester.pumpAndSettle();
+    await tester.tap(find.text('Configure Enable Banking'));
+    await tester.pumpAndSettle();
     await shot(tester, '11_dark_setup');
 
     await saveCredentials(tester);
@@ -212,7 +215,6 @@ void main() {
     await tester.pumpAndSettle(const Duration(seconds: 5));
     await shot(tester, '15_dark_aspsp_sheet');
 
-    // No need to restore the theme: preferences are mocked in memory and
-    // die with the test.
+    // No need to restore the theme: prefs are mocked and die with the test.
   });
 }

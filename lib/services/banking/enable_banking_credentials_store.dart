@@ -9,9 +9,8 @@ const _kAppIdKey = 'eb_app_id';
 const _kPrivateKeyPemKey = 'eb_private_key_pem';
 const _kConfigJsonKey = 'eb_config_json';
 
-/// Encrypted persistence for the user's BYOC Enable Banking credentials
-/// (Keychain on iOS/macOS, Keystore-backed EncryptedSharedPreferences on
-/// Android). The private key is never logged nor exposed beyond this store.
+// Encrypted persistence for BYOC credentials (Keychain/Keystore-backed);
+// the private key is never logged nor exposed beyond this store.
 class EnableBankingCredentialsStore {
   final FlutterSecureStorage _storage;
 
@@ -25,13 +24,8 @@ class EnableBankingCredentialsStore {
             ),
           );
 
-  /// Serializes every write below against [readCredentials], so that method
-  /// can never observe a config/private-key pair torn apart by a
-  /// saveCredentials()/clear()/clearConfig() landing in the middle of its
-  /// two reads. Static rather than per-instance: every
-  /// [EnableBankingCredentialsStore] ultimately talks to the same
-  /// underlying secure storage backend, const-constructed instances
-  /// included, so per-instance locking wouldn't serialize anything.
+  // Static lock serializes writes against readCredentials' two reads, so it
+  // never observes a torn config/private-key pair.
   static Future<void> _lock = Future.value();
 
   Future<T> _synchronized<T>(Future<T> Function() action) async {
@@ -75,10 +69,8 @@ class EnableBankingCredentialsStore {
 
   Future<String?> readPrivateKey() => _storage.read(key: _kPrivateKeyPemKey);
 
-  /// Reads `app_id`/config and the private key together as one atomic pair
-  /// — used by [EnableBankingAuth.getValidToken] so the signed JWT always
-  /// corresponds to an appId/key combination that was actually saved
-  /// together, never a mix of a stale and a fresh state.
+  // Reads config and private key together atomically, so the signed JWT
+  // never mixes a stale and a fresh state.
   Future<(EnableBankingConfig?, String?)> readCredentials() {
     return _synchronized(() async {
       final config = await readConfig();
@@ -87,9 +79,8 @@ class EnableBankingCredentialsStore {
     });
   }
 
-  /// Persists a private key on its own, ahead of having an `app_id` for it
-  /// (e.g. one just generated on-device, before its certificate has been
-  /// registered on the Enable Banking control panel).
+  // Persists a private key before an app_id exists for it (e.g. one just
+  // generated on-device, not yet registered).
   Future<void> savePrivateKey(String privateKeyPem) => _synchronized(
     () => _storage.write(key: _kPrivateKeyPemKey, value: privateKeyPem),
   );
@@ -104,10 +95,8 @@ class EnableBankingCredentialsStore {
     await _storage.delete(key: _kConfigJsonKey);
   });
 
-  /// Clears `app_id`/config but leaves the private key untouched. Used when
-  /// regenerating the key pair: the old `app_id` was tied to the previous
-  /// certificate and must not survive, but a private key just written by
-  /// [savePrivateKey] must not be wiped out along with it.
+  // Clears app_id/config only, leaving the private key untouched (used
+  // when regenerating the key pair).
   Future<void> clearConfig() => _synchronized(() async {
     await _storage.delete(key: _kAppIdKey);
     await _storage.delete(key: _kConfigJsonKey);

@@ -1,7 +1,3 @@
-/// Sandbox metadata attached to an [Aspsp] in the `/aspsps` response.
-///
-/// Only present for sandbox ASPSPs; captured defensively as the shape of the
-/// nested `users` entries is not stable across banks.
 class SandboxInfo {
   final List<Map<String, dynamic>> users;
 
@@ -12,14 +8,13 @@ class SandboxInfo {
   );
 }
 
-/// A bank (ASPSP) as returned by `GET /aspsps`.
 class Aspsp {
   final String name;
   final String country;
   final String? logo;
   final List<String> psuTypes;
 
-  /// Maximum consent validity in **seconds** (`maximum_consent_validity`).
+  // Seconds.
   final int? maximumConsentValidity;
   final bool beta;
   final SandboxInfo? sandbox;

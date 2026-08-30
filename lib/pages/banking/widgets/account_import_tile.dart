@@ -8,8 +8,6 @@ import '../../../ui/device.dart';
 import '../../../ui/extensions.dart';
 import 'account_icon_color_selector.dart';
 
-/// One account offered by the bank: whether to import it and, when it is
-/// selected, how it should look among the app accounts.
 class AccountImportTile extends ConsumerWidget {
   const AccountImportTile({
     required this.account,
@@ -32,8 +30,6 @@ class AccountImportTile extends ConsumerWidget {
   final ValueChanged<String> onIconChanged;
   final ValueChanged<int> onColorChanged;
 
-  /// Keeps the first and last characters only: enough to tell the accounts
-  /// apart without spelling out the full IBAN.
   static String maskIban(String? iban) {
     if (iban == null || iban.isEmpty) return '—';
     if (iban.length <= 6) return iban;

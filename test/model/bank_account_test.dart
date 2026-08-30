@@ -162,7 +162,6 @@ void main() {
       );
 
       // Add transactions of current month
-      // 1
       demoTransactions.add(
         createInsertSqlTransaction(date: fistOfCurrentMonth),
       );
@@ -172,7 +171,6 @@ void main() {
       demoTransactions.add(
         createInsertSqlTransaction(date: fistOfCurrentMonth, idBankAccount: 71),
       );
-      // 2
       demoTransactions.add(
         createInsertSqlTransaction(
           date: fistOfCurrentMonth.add(const Duration(days: 1)),
@@ -200,7 +198,6 @@ void main() {
           idBankTransfert: 71,
         ),
       );
-      // 3
       demoTransactions.add(
         createInsertSqlTransaction(
           date: fistOfCurrentMonth.add(const Duration(days: 2)),
@@ -219,8 +216,6 @@ void main() {
           idBankAccount: 71,
         ),
       );
-
-      // Add recurring transactions. These must be count as number of time they occout * amount
 
       await db.execute(
         "$insertDemoTransactionsQuery ${demoTransactions.join(",")};",
@@ -374,13 +369,13 @@ void main() {
               DateTime.now().year,
               DateTime.now().month,
               1,
-            ), // beginnig of current month
+            ), // beginning of current month
             dateRangeEnd: DateTime(
               DateTime.now().year,
               DateTime.now().month + 1,
               1,
             ),
-          ); // beginnig of next month
+          ); // beginning of next month
       expect(result.length, 3);
 
       final DateFormat formatter = DateFormat('yyyy-MM-dd');
@@ -412,7 +407,7 @@ void main() {
               DateTime.now().month + 1,
               1,
             ),
-          ); // beginnig of next month;
+          ); // beginning of next month
       expect(result.length, 3);
 
       initialAccountAmount = 3823.56; // taken from fillDemoData

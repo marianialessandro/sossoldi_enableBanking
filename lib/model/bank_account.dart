@@ -45,8 +45,7 @@ class BankAccountFields extends BaseEntityFields {
 }
 
 class BankAccount extends BaseEntity {
-  // Sentinel distinguishing "not passed" from "explicitly set to null" for
-  // the nullable bank-sync fields below, so copy() can clear them.
+  // Sentinel so copy() can null out the bank-sync fields explicitly.
   static const _unset = Object();
 
   final String name;

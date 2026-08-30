@@ -1,7 +1,3 @@
-/// A bank account (AccountResource) as returned inside a session or accounts
-/// list.
-///
-/// The IBAN is nested under `account_id.iban`.
 class EbAccount {
   final String uid;
   final String? iban;
@@ -27,6 +23,7 @@ class EbAccount {
 
   static EbAccount fromJson(Map<String, dynamic> json) => EbAccount(
     uid: json['uid'] as String,
+    // IBAN is nested under account_id.iban.
     iban: (json['account_id'] as Map<String, dynamic>?)?['iban'] as String?,
     name: json['name'] as String?,
     details: json['details'] as String?,

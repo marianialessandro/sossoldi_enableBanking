@@ -16,6 +16,7 @@ dependencies:
   app_links: ^6.3.0
   basic_utils: ^5.7.0
   collection: ^1.19.1
+  country_flags: ^4.1.2
   csv: ^6.0.0
   cupertino_icons: ^1.0.8
   dart_jsonwebtoken: ^2.14.0

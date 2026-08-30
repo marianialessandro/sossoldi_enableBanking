@@ -248,7 +248,7 @@ void main() {
       final today = DateTime.now();
       final fistOfLastMonth = DateTime(today.year, today.month - 1, 1);
 
-      // Add a transaction of two month ago
+      // Add a transaction of two months ago
       demoTransactions.add(
         createInsertSqlTransaction(
           date: fistOfLastMonth.subtract(const Duration(days: 10)),

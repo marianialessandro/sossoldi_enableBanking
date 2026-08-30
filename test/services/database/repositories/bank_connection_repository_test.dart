@@ -72,7 +72,7 @@ void main() {
             ebConnectionId: connection.id,
           ),
         );
-        // A manual account, untouched by any account's connectionId match.
+        // A manual account: disconnect must leave it untouched.
         final manualAccount = await accountRepository.insert(
           const BankAccount(
             name: 'Cash',

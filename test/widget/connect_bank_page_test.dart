@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:country_flags/country_flags.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -48,7 +49,6 @@ class _FakeAccountRepository extends AccountRepository {
       accounts;
 }
 
-/// Keeps the deep link listener off the platform channel.
 class _SilentUriLinkSource implements UriLinkSource {
   final StreamController<Uri> controller = StreamController<Uri>.broadcast();
 
@@ -141,6 +141,17 @@ void main() {
       find.widgetWithIcon(IconButton, Icons.add_circle),
     );
     expect(addButton.onPressed, isNotNull);
+  });
+
+  testWidgets('country picker renders image flags', (tester) async {
+    await pumpPage(tester, config: const EnableBankingConfig(appId: 'app-1'));
+
+    await tester.tap(find.widgetWithIcon(IconButton, Icons.add_circle));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(CountryFlag), findsWidgets);
+    expect(find.text('Italy'), findsOneWidget);
+    expect(find.text('IT'), findsOneWidget);
   });
 
   testWidgets('lists an active connection with its linked accounts', (

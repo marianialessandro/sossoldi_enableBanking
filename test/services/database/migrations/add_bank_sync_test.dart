@@ -33,7 +33,6 @@ void main() {
   test(
     'upgrading a v7 database to v8 adds bank sync schema without data loss',
     () async {
-      // A pre-existing v7 database with a manual account and transaction.
       final v7db = await databaseFactory.openDatabase(
         dbPath,
         options: OpenDatabaseOptions(
@@ -107,7 +106,6 @@ void main() {
       );
       expect(indexes, isNotEmpty);
 
-      // Pre-existing data survives, with the new columns defaulting to NULL.
       final accounts = await v8db.query(bankAccountTable);
       expect(accounts, hasLength(1));
       expect(accounts.single[BankAccountFields.name], 'Revolut');

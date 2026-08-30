@@ -1,6 +1,3 @@
-/// Authorization start response from `POST /auth`.
-///
-/// [url] is the consent page the PSU must be sent to.
 class EbAuthorization {
   final String url;
   final String authorizationId;

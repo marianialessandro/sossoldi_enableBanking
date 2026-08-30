@@ -1,7 +1,11 @@
 import 'enable_banking_exception.dart';
 
-/// Default OAuth callback URI registered with Enable Banking.
-const String kEbRedirectUri = 'sossoldi://eb-callback';
+const String kEbAppCallbackUri = 'sossoldi://eb-callback';
+const String kEbRedirectUri =
+    'https://rip-comm.github.io/sossoldi/enablebanking/eb-callback.html';
+
+const String _kLegacyHostedRedirectUri =
+    'https://marianialessandro.com/sossoldi/eb-callback.html';
 
 enum EnableBankingEnvironment {
   production,
@@ -16,10 +20,8 @@ enum EnableBankingEnvironment {
   String toJson() => name;
 }
 
-/// Non-secret configuration for a user's Enable Banking application.
-///
-/// The `app_id` and private key are BYOC credentials owned by the user and
-/// live in [EnableBankingCredentialsStore], not here.
+// app_id and the private key are BYOC credentials; they live in
+// EnableBankingCredentialsStore, not here.
 class EnableBankingConfig {
   final String appId;
   final EnableBankingEnvironment environment;
@@ -33,22 +35,20 @@ class EnableBankingConfig {
     this.defaultCountry,
   });
 
-  /// Enable Banking serves the same host for both production and sandbox;
-  /// the environment is fixed at application registration time.
+  // Enable Banking serves the same host for both production and sandbox.
   String get baseUrl => 'https://api.enablebanking.com';
 
-  /// Throws [EnableBankingException] (not a raw [TypeError]) if [json] is a
-  /// corrupted or otherwise incompatible blob — e.g. leftover from a
-  /// previous, incompatible app version — instead of the required `app_id`
-  /// field being missing or of an unexpected type.
   static EnableBankingConfig fromJson(Map<String, dynamic> json) {
     try {
+      final storedRedirectUri = json['redirect_uri'] as String?;
       return EnableBankingConfig(
         appId: json['app_id'] as String,
         environment: EnableBankingEnvironment.fromJson(
           json['environment'] as String? ?? 'production',
         ),
-        redirectUri: json['redirect_uri'] as String? ?? kEbRedirectUri,
+        redirectUri: storedRedirectUri == _kLegacyHostedRedirectUri
+            ? kEbRedirectUri
+            : storedRedirectUri ?? kEbRedirectUri,
         defaultCountry: json['default_country'] as String?,
       );
     } catch (e) {

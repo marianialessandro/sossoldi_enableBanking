@@ -264,9 +264,8 @@ class TransactionsRepository {
         .toSet();
   }
 
-  /// Inserts [items], skipping any whose `(idBankAccount, externalId)` pair
-  /// already exists, so re-syncing the same bank transactions is idempotent.
-  /// Returns the number of transactions actually inserted.
+  // Skips items already present for that account+externalId, so
+  // re-syncing bank transactions is idempotent
   Future<int> insertMissing(List<Transaction> items) async {
     if (items.isEmpty) return 0;
 

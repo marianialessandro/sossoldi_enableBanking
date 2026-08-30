@@ -11,9 +11,6 @@ import '../../../ui/device.dart';
 import '../../../ui/snack_bars/snack_bar.dart';
 import '../../../ui/widgets/rounded_icon.dart';
 
-/// Bottom sheet content: the banks available in the chosen country. Tapping
-/// one starts the Enable Banking authorization and hands the user over to
-/// the bank consent page in an external browser.
 class AspspSelector extends ConsumerStatefulWidget {
   const AspspSelector({
     required this.scrollController,
@@ -155,8 +152,6 @@ class _AspspSelectorState extends ConsumerState<AspspSelector> {
   }
 }
 
-/// Bank logo, falling back to the generic bank icon whenever the ASPSP has
-/// no logo or it cannot be fetched.
 class _AspspLogo extends StatelessWidget {
   const _AspspLogo({this.logo});
 

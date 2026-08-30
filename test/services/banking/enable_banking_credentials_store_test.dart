@@ -5,9 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:sossoldi/services/banking/enable_banking_config.dart';
 import 'package:sossoldi/services/banking/enable_banking_credentials_store.dart';
 
-/// Lets a test pause [readConfig] mid-flight, so it can force
-/// [readCredentials] to still be awaiting its first read while a
-/// [saveCredentials] call lands concurrently.
+// Pauses readConfig() so saveCredentials() can land mid-read.
 class _GatedCredentialsStore extends EnableBankingCredentialsStore {
   final Completer<void> readConfigGate = Completer<void>();
 
@@ -118,12 +116,10 @@ void main() {
         config: const EnableBankingConfig(appId: 'old-app'),
       );
 
-      // Starts readCredentials(): it acquires the lock, then blocks
-      // inside readConfig() on the gate below, still holding the lock.
+      // Acquires the lock, then blocks in readConfig() while still holding it.
       final readFuture = store.readCredentials();
 
-      // Queues behind the held lock: must not run until readCredentials
-      // above has both read its pair and released the lock.
+      // Queued behind the lock; must wait until readCredentials finishes.
       final saveFuture = store.saveCredentials(
         appId: 'new-app',
         privateKeyPem: 'new-pem',
@@ -134,12 +130,9 @@ void main() {
       final (config, privateKeyPem) = await readFuture;
       await saveFuture;
 
-      // The pair read must be entirely the old state or entirely the
-      // new one — never old appId with new privateKeyPem or vice versa.
       expect(config?.appId, 'old-app');
       expect(privateKeyPem, 'old-pem');
 
-      // The queued write must have gone through once the lock freed up.
       final reloaded = await store.readConfig();
       expect(reloaded?.appId, 'new-app');
       expect(await store.readPrivateKey(), 'new-pem');

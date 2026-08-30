@@ -220,9 +220,7 @@ class AccountRepository {
     return maps.isNotEmpty ? BankAccount.fromJson(maps.first) : null;
   }
 
-  /// Accounts still linked to Enable Banking and eligible for sync: a
-  /// deactivated or soft-deleted account keeps its `ebAccountUid` around but
-  /// must not be synced any more.
+  // Excludes deactivated or soft-deleted accounts, even if still linked
   Future<List<BankAccount>> selectLinked() async {
     final db = await _sossoldiDB.database;
 
@@ -249,8 +247,49 @@ class AccountRepository {
     );
   }
 
-  /// Turns a linked account back into a manual one; the account and its
-  /// transaction history are kept, only the Enable Banking link is dropped.
+  Future<void> reconcileLinkedBalance(int accountId, num currentBalance) async {
+    final db = await _sossoldiDB.database;
+
+    await db.transaction((txn) async {
+      final result = await txn.rawQuery(
+        '''
+        SELECT
+          COALESCE(SUM(CASE
+            WHEN ${TransactionFields.type} = 'IN'
+              OR (${TransactionFields.type} = 'TRSF'
+                AND ${TransactionFields.idBankAccountTransfer} = ?)
+            THEN ${TransactionFields.amount} ELSE 0 END), 0) AS income,
+          COALESCE(SUM(CASE
+            WHEN ${TransactionFields.type} = 'OUT'
+              OR (${TransactionFields.type} = 'TRSF'
+                AND ${TransactionFields.idBankAccount} = ?)
+            THEN ${TransactionFields.amount} ELSE 0 END), 0) AS expense
+        FROM "$transactionTable"
+        WHERE ${TransactionFields.idBankAccount} = ?
+          OR ${TransactionFields.idBankAccountTransfer} = ?
+      ''',
+        [accountId, accountId, accountId, accountId],
+      );
+
+      final income = result.single['income'] as num;
+      final expense = result.single['expense'] as num;
+      final startingValue = double.parse(
+        (currentBalance - income + expense).toStringAsFixed(2),
+      );
+
+      await txn.update(
+        bankAccountTable,
+        {
+          BankAccountFields.startingValue: startingValue,
+          BankAccountFields.updatedAt: DateTime.now().toIso8601String(),
+        },
+        where: '${BankAccountFields.id} = ?',
+        whereArgs: [accountId],
+      );
+    });
+  }
+
+  // Keeps the account and its history, only drops the Enable Banking link
   Future<void> unlink(int accountId) async {
     final db = await _sossoldiDB.database;
 

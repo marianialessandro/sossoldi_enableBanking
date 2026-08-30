@@ -9,24 +9,13 @@ import '../database/repositories/transactions_repository.dart';
 import 'enable_banking_api.dart';
 import 'enable_banking_exception.dart';
 import 'enable_banking_transaction_mapper.dart';
+import 'models/eb_balance.dart';
 import 'models/eb_transaction.dart';
 
-/// Disambiguates [mapped] transactions that share a fallback dedup key —
-/// the composite of date/amount/direction/description that
-/// [EbTransaction.stableId] falls back to only when the ASPSP sends
-/// neither `entry_reference` nor `transaction_id` — by appending their
-/// occurrence index within this batch. Two genuinely distinct same-day
-/// purchases with identical amount/description (e.g. two coffees at the
-/// same shop) then become `<key>#0`/`<key>#1` instead of colliding on the
-/// same id and having the second silently dropped by
-/// `TransactionsRepository.insertMissing`.
-///
-/// Best effort, not a guarantee: it only holds as long as the bank returns
-/// the same transactions in the same relative order on every sync, which
-/// isn't documented by the API but is what ASPSPs do in practice for a
-/// stable historical date range. Transactions with a bank-provided id are
-/// left untouched — changing their externalId format would break dedup
-/// against everything already synced under the un-suffixed id.
+// Appends an occurrence index to fallback dedup keys (used when the ASPSP
+// sends no entry_reference/transaction_id) so two same-day transactions
+// with identical amount/description don't collide and get dropped by
+// insertMissing.
 List<Transaction> _disambiguateFallbackIds(
   List<EbTransaction> source,
   List<Transaction> mapped,
@@ -51,15 +40,12 @@ List<Transaction> _disambiguateFallbackIds(
   return result;
 }
 
-/// Re-fetched on every sync so a transaction still `PDNG` (pending) on the
-/// previous run is picked up once it books with the same `entry_reference`.
+// Re-fetched every sync so a transaction still pending on the previous run
+// is picked up once it books with the same entry_reference.
 const _kSyncMargin = Duration(days: 3);
 
-/// Window fetched on an account's very first sync (no `lastSyncAt` yet).
 const _kInitialSyncWindow = Duration(days: 90);
 
-/// Fetches, maps and dedups Enable Banking transactions into the local
-/// database, one linked [BankAccount]/[BankConnection] at a time.
 class EnableBankingSyncService {
   EnableBankingSyncService({
     required EnableBankingApi api,
@@ -76,9 +62,6 @@ class EnableBankingSyncService {
   final TransactionsRepository _transactionsRepository;
   final BankConnectionRepository _bankConnectionRepository;
 
-  /// Fetches and inserts new booked transactions for [account] and updates
-  /// its `lastSyncAt`. Returns the number of transactions actually inserted
-  /// (0 for an account not linked to Enable Banking).
   Future<int> syncAccount(BankAccount account) async {
     final accountUid = account.ebAccountUid;
     if (accountUid == null) return 0;
@@ -108,18 +91,23 @@ class EnableBankingSyncService {
       disambiguated,
     );
 
+    final currentBalance = preferredEbBalanceAmount(
+      await _api.getBalances(accountUid),
+    );
+    if (currentBalance != null) {
+      await _accountRepository.reconcileLinkedBalance(
+        account.id!,
+        currentBalance,
+      );
+    }
+
     await _accountRepository.updateLastSync(account.id!, now);
     return insertedCount;
   }
 
-  /// Syncs every account imported from [connection]. On a 401 (expired or
-  /// revoked consent) the connection is marked `EXPIRED` and its remaining
-  /// accounts are skipped for this run, since they all share the same
-  /// expired consent; other connections are unaffected (see [syncAll]). Any
-  /// other error (timeout, malformed response, ...) is isolated to the
-  /// account it happened on — logged and skipped — so a single flaky
-  /// account doesn't stop the rest of the connection's accounts from
-  /// syncing.
+  // On a 401 the connection is marked EXPIRED and its remaining accounts
+  // are skipped; any other error is isolated to the account it happened on
+  // so one flaky account doesn't stop the rest.
   Future<Map<int, int>> syncConnection(BankConnection connection) async {
     final linked = (await _accountRepository.selectLinked())
         .where((account) => account.ebConnectionId == connection.id)
@@ -153,13 +141,8 @@ class EnableBankingSyncService {
     );
   }
 
-  /// Syncs every `ACTIVE` connection. A connection whose sync fails outright
-  /// (e.g. a network error, a malformed response from the bank, or an
-  /// expired consent already handled by [syncConnection]) does not block
-  /// the others: any exception is swallowed, not just [EnableBankingException].
-  /// Logged rather than dropped silently — otherwise a connection broken in
-  /// a way that never leaves this method (e.g. a persistently malformed
-  /// response) fails every scheduled sync forever with no diagnosable trace.
+  // Any exception is swallowed and logged, not just EnableBankingException,
+  // so one broken connection doesn't block the others or fail silently.
   Future<void> syncAll() async {
     final connections = await _bankConnectionRepository.selectActive();
     for (final connection in connections) {
@@ -171,7 +154,6 @@ class EnableBankingSyncService {
           '(${connection.aspspName}/${connection.aspspCountry}): $e',
           name: 'EnableBankingSyncService',
         );
-        // Skip this connection for now; the next scheduled sync retries it.
       }
     }
   }

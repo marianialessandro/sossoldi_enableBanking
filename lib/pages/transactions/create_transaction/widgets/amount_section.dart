@@ -21,14 +21,10 @@ class AmountSection extends ConsumerStatefulWidget {
 
   final TextEditingController amountController;
 
-  /// Whether the income/expense/transfer toggle responds to taps. Locked
-  /// for reconciliation adjustments and bank-imported transactions, whose
-  /// type is fixed by how they were created.
+  // Locked for reconciliation adjustments and bank-imported transactions.
   final bool typeEditingPermitted;
 
-  /// Whether the amount field can be edited. Locked for reconciliation
-  /// adjustments, whose amount is fixed by the balance difference at the
-  /// moment it was created.
+  // Locked for reconciliation adjustments, whose amount is fixed.
   final bool amountEditingPermitted;
 
   @override

@@ -9,8 +9,6 @@ import 'widgets/aspsp_selector.dart';
 import 'widgets/connection_card.dart';
 import 'widgets/country_selector.dart';
 
-/// Banking hub: the banks already linked, plus the entry point of the
-/// country → bank → consent flow.
 class ConnectBankPage extends ConsumerStatefulWidget {
   const ConnectBankPage({super.key});
 
@@ -57,9 +55,7 @@ class _ConnectBankPageState extends ConsumerState<ConnectBankPage> {
         ref.watch(enableBankingSettingsProvider).value != null;
     final connections = ref.watch(bankConnectionsProvider);
 
-    // The consent callback lands app-wide (see EnableBankingDeeplinkService):
-    // here we only follow up on the success case. Failures are already
-    // surfaced by the root listener in Launcher.
+    // Failures already surface via the root listener in Launcher.
     ref.listen(bankCallbackHandlerProvider, (previous, next) {
       if (next.connectionId == null ||
           next.connectionId == previous?.connectionId) {
