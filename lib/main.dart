@@ -9,6 +9,7 @@ import 'package:timezone/timezone.dart' as tz;
 import 'package:flutter_phoenix/flutter_phoenix.dart';
 
 import 'providers/settings_provider.dart';
+import 'providers/banking_provider.dart';
 import 'providers/theme_provider.dart';
 import 'routes/routes.dart';
 import 'services/database/repositories/recurring_transactions_repository.dart';
@@ -101,6 +102,7 @@ class Launcher extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    ref.watch(enableBankingCallbackBootstrapProvider);
     final appThemeState = ref.watch(appThemeStateProvider);
     final bool isOnboardingCompleted = ref.watch(onBoardingCompletedProvider);
     return MaterialApp(
