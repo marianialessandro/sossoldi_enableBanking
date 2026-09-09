@@ -170,7 +170,25 @@ class SossoldiDatabase {
 
       // Import each table's data
       await db.transaction((txn) async {
-        for (var entry in tableData.entries) {
+        for (final table in [
+          'bankRemoteTransaction',
+          'bankSyncState',
+          'bankSyncAudit',
+        ]) {
+          await txn.delete(table);
+        }
+        final entries = tableData.entries.toList();
+        const bankRestoreOrder = {
+          'bankRemoteTransaction': 1,
+          'bankSyncState': 2,
+          'bankSyncAudit': 3,
+        };
+        entries.sort(
+          (first, second) => (bankRestoreOrder[first.key] ?? 0).compareTo(
+            bankRestoreOrder[second.key] ?? 0,
+          ),
+        );
+        for (var entry in entries) {
           final String tableName = entry.key;
           final List<List<dynamic>> tableRows = entry.value;
 
@@ -372,9 +390,10 @@ class SossoldiDatabase {
   }
 
   Future resetDatabase() async {
+    final db = await database;
     // delete database
     try {
-      await _database?.transaction((txn) async {
+      await db.transaction((txn) async {
         var batch = txn.batch();
         // drop tables
         batch.execute('DROP TABLE IF EXISTS $bankAccountTable');
@@ -385,18 +404,25 @@ class SossoldiDatabase {
         batch.execute('DROP TABLE IF EXISTS $currencyTable');
         batch.execute('DROP TABLE IF EXISTS $bankAccountIdentityTable');
         batch.execute('DROP TABLE IF EXISTS $bankConnectionTable');
+        batch.execute('DROP TABLE IF EXISTS bankRemoteTransaction');
+        batch.execute('DROP TABLE IF EXISTS bankSyncState');
+        batch.execute('DROP TABLE IF EXISTS bankSyncAudit');
         await batch.commit();
       });
     } catch (error) {
       throw Exception('DbBase.resetDatabase: $error');
     }
-    await _createDB(_database!, _migrationManager.latestVersion);
+    await _createDB(db, _migrationManager.latestVersion);
   }
 
   Future clearDatabase() async {
+    final db = await database;
     try {
-      await _database?.transaction((txn) async {
+      await db.transaction((txn) async {
         var batch = txn.batch();
+        batch.delete('bankRemoteTransaction');
+        batch.delete('bankSyncState');
+        batch.delete('bankSyncAudit');
         batch.delete(bankAccountTable);
         batch.delete(transactionTable);
         batch.delete(recurringTransactionTable);

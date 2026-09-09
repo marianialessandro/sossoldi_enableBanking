@@ -14,6 +14,7 @@ import 'enable_banking_deeplink_service.dart';
 import 'enable_banking_exception.dart';
 import 'enable_banking_platform_support.dart';
 import 'models/aspsp.dart';
+import 'models/bank_money.dart';
 import 'models/eb_account.dart';
 import 'models/eb_session.dart';
 import 'models/eb_session_details.dart';
@@ -328,13 +329,24 @@ class BankConsentLifecycleService {
     int connectionId,
     List<({EbAccount remote, BankAccount? newAccount})> selections,
   ) async {
+    for (final selection in selections) {
+      final scale = BankMoney.scales[selection.remote.currency];
+      if (scale == null || scale > 2) {
+        throw const FormatException(
+          'Remote account currency is not supported by the current display',
+        );
+      }
+    }
     final links = selections
         .map(
           (selection) => BankAccountLink(
             uid: selection.remote.uid,
             identificationHashes: selection.remote.stableHashes,
             iban: selection.remote.iban,
-            newAccount: selection.newAccount,
+            newAccount: selection.newAccount?.id == null
+                ? selection.newAccount?.copy(startingValue: 0)
+                : selection.newAccount,
+            currency: selection.remote.currency,
           ),
         )
         .toList(growable: false);

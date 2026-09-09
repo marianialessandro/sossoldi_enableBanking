@@ -2,7 +2,14 @@ import 'eb_amount.dart';
 
 DateTime? _parseDate(Object? value) {
   if (value == null) return null;
-  return DateTime.tryParse(value as String);
+  if (value is! String || !RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(value)) {
+    throw const FormatException('Invalid bank transaction date');
+  }
+  final date = DateTime.tryParse(value);
+  if (date == null || date.toIso8601String().substring(0, 10) != value) {
+    throw const FormatException('Invalid bank transaction date');
+  }
+  return date;
 }
 
 /// A single transaction as returned by `GET /accounts/{uid}/transactions`.
@@ -56,15 +63,23 @@ class EbTransaction {
     note: json['note'] as String?,
   );
 
-  /// Signed amount: positive for credits (`CRDT`), negative otherwise.
-  ///
-  /// Anything that is not `CRDT` (e.g. `DBIT`/`DBDT`) is treated as an outflow.
-  num get signedAmount => creditDebitIndicator == 'CRDT'
-      ? transactionAmount.amount
-      : -transactionAmount.amount;
+  /// Signed amount, rejecting unknown indicators and invalid magnitudes.
+  num get signedAmount {
+    if (!transactionAmount.amount.isFinite || transactionAmount.amount < 0) {
+      throw const FormatException('Invalid transaction magnitude');
+    }
+    return switch (creditDebitIndicator) {
+      'CRDT' => transactionAmount.amount,
+      'DBIT' => -transactionAmount.amount,
+      _ => throw const FormatException('Unknown credit/debit indicator'),
+    };
+  }
 
-  /// Stable dedup key: `entry_reference` when present, else `transaction_id`.
-  String? get stableId => entryReference ?? transactionId;
+  /// Only an entry reference can identify a transaction across retrievals.
+  String? get stableId {
+    final reference = entryReference?.trim();
+    return reference == null || reference.isEmpty ? null : reference;
+  }
 
   bool get isBooked => status == 'BOOK';
 }

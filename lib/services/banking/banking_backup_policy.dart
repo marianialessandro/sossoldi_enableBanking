@@ -19,6 +19,9 @@ class BankingBackupPolicy {
     } else if (table == bankAccountTable) {
       sanitized[BankAccountFields.ebAccountUid] = null;
       sanitized[BankAccountFields.lastSyncAt] = null;
+    } else if (table == 'bankSyncState') {
+      sanitized['checkpoint'] = null;
+      sanitized['completedAt'] = null;
     }
     return sanitized;
   }

@@ -12,8 +12,28 @@ import '../services/banking/enable_banking_deeplink_service.dart';
 import '../services/banking/enable_banking_platform_support.dart';
 import '../services/banking/pending_bank_authorization_store.dart';
 import '../services/database/repositories/bank_connection_repository.dart';
+import '../services/database/repositories/bank_sync_repository.dart';
+import '../services/database/sossoldi_database.dart';
+import '../services/banking/enable_banking_sync_service.dart';
 
 part 'banking_provider.g.dart';
+
+@Riverpod(keepAlive: true)
+BankSyncRepository bankSyncRepository(Ref ref) =>
+    BankSyncRepository(database: ref.watch(databaseProvider));
+
+@Riverpod(keepAlive: true)
+EnableBankingSyncService enableBankingSyncService(Ref ref) =>
+    EnableBankingSyncService(
+      api: ref.watch(enableBankingApiProvider),
+      repository: ref.watch(bankSyncRepositoryProvider),
+      applicationId: () async =>
+          (await ref
+                  .read(enableBankingCredentialsStoreProvider)
+                  .readCredentials())
+              ?.config
+              .appId,
+    );
 
 @Riverpod(keepAlive: true)
 EnableBankingCredentialsStore enableBankingCredentialsStore(Ref ref) =>

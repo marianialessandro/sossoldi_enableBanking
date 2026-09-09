@@ -4,6 +4,21 @@ import 'package:sossoldi/model/bank_connection.dart';
 import 'package:sossoldi/services/banking/banking_backup_policy.dart';
 
 void main() {
+  test(
+    'restored sync state retains exact money but cannot skip bank history',
+    () {
+      final restored = BankingBackupPolicy.sanitizeForRestore('bankSyncState', {
+        'accountId': 1,
+        'currency': 'EUR',
+        'balanceMinor': '23275',
+        'checkpoint': '2026-09-06',
+        'completedAt': '2026-09-07T12:00:00Z',
+      });
+      expect(restored['checkpoint'], isNull);
+      expect(restored['completedAt'], isNull);
+      expect(restored['balanceMinor'], '23275');
+    },
+  );
   test('export redacts usable sessions and transient account identifiers', () {
     final connection =
         BankingBackupPolicy.sanitizeForExport(bankConnectionTable, {

@@ -35,12 +35,14 @@ class BankAccountLink {
   final Set<String> identificationHashes;
   final String? iban;
   final BankAccount? newAccount;
+  final String? currency;
 
   const BankAccountLink({
     required this.uid,
     required this.identificationHashes,
     this.iban,
     this.newAccount,
+    this.currency,
   });
 }
 
@@ -291,6 +293,7 @@ class BankConnectionRepository {
             identificationHashes: hashes,
             iban: link.iban,
             newAccount: link.newAccount,
+            currency: link.currency,
           ),
         );
       }
@@ -308,6 +311,18 @@ class BankConnectionRepository {
       final selectedAccountIds = <int>{};
 
       for (final link in normalized) {
+        if (link.currency != null) {
+          final selectedCurrencies = await txn.query(
+            'currency',
+            where: 'mainCurrency = 1',
+          );
+          if (selectedCurrencies.length != 1 ||
+              selectedCurrencies.single['code'] != link.currency) {
+            throw const FormatException(
+              'Linked account must use the global currency',
+            );
+          }
+        }
         final matchingIds = link.identificationHashes
             .map((hash) => identityOwners[hash])
             .whereType<int>()
@@ -371,6 +386,8 @@ class BankConnectionRepository {
             BankAccountFields.identificationHash: sortedHashes.first,
             BankAccountFields.identificationHashes: jsonEncode(sortedHashes),
             BankAccountFields.iban: link.iban,
+            if (link.currency != null)
+              BankAccountFields.currencyCode: link.currency,
             BankAccountFields.active: 1,
             BankAccountFields.updatedAt: DateTime.now()
                 .toUtc()
@@ -571,6 +588,14 @@ class BankConnectionRepository {
     int connectionId,
     int accountId,
   ) async {
+    // The retained transaction projections become ordinary editable manual data.
+    for (final table in [
+      'bankRemoteTransaction',
+      'bankSyncState',
+      'bankSyncAudit',
+    ]) {
+      await txn.delete(table, where: 'accountId = ?', whereArgs: [accountId]);
+    }
     await txn.delete(
       bankAccountIdentityTable,
       where:
@@ -586,6 +611,7 @@ class BankConnectionRepository {
         BankAccountFields.identificationHash: null,
         BankAccountFields.identificationHashes: null,
         BankAccountFields.lastSyncAt: null,
+        BankAccountFields.currencyCode: null,
       },
       where: '${BankAccountFields.id} = ?',
       whereArgs: [accountId],
