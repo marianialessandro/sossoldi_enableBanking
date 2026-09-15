@@ -1,3 +1,5 @@
+// dart format width=400
+
 import '../ui/extensions.dart';
 import 'base_entity.dart';
 
@@ -23,27 +25,9 @@ class BankAccountFields extends BaseEntityFields {
   static String identificationHashes = 'identificationHashes';
   static String iban = 'iban';
   static String lastSyncAt = 'lastSyncAt';
+  static String currencyCode = 'currencyCode';
 
-  static final List<String> allFields = [
-    BaseEntityFields.id,
-    name,
-    symbol,
-    color,
-    startingValue,
-    active,
-    countNetWorth,
-    mainAccount,
-    order,
-    BaseEntityFields.createdAt,
-    BaseEntityFields.updatedAt,
-    BaseEntityFields.deletedAt,
-    ebAccountUid,
-    ebConnectionId,
-    identificationHash,
-    identificationHashes,
-    iban,
-    lastSyncAt,
-  ];
+  static final List<String> allFields = [BaseEntityFields.id, name, symbol, color, startingValue, active, countNetWorth, mainAccount, order, BaseEntityFields.createdAt, BaseEntityFields.updatedAt, BaseEntityFields.deletedAt, ebAccountUid, ebConnectionId, identificationHash, identificationHashes, iban, lastSyncAt, currencyCode];
 }
 
 class BankAccount extends BaseEntity {
@@ -64,6 +48,7 @@ class BankAccount extends BaseEntity {
   final String? identificationHashes;
   final String? iban;
   final DateTime? lastSyncAt;
+  final String? currencyCode;
 
   const BankAccount({
     super.id,
@@ -82,6 +67,7 @@ class BankAccount extends BaseEntity {
     this.identificationHashes,
     this.iban,
     this.lastSyncAt,
+    this.currencyCode,
     super.createdAt,
     super.updatedAt,
     super.deletedAt,
@@ -106,6 +92,7 @@ class BankAccount extends BaseEntity {
     Object? identificationHashes = _unset,
     Object? iban = _unset,
     Object? lastSyncAt = _unset,
+    Object? currencyCode = _unset,
   }) => BankAccount(
     id: id ?? this.id,
     name: name ?? this.name,
@@ -120,22 +107,13 @@ class BankAccount extends BaseEntity {
     updatedAt: updatedAt ?? this.updatedAt,
     deletedAt: deletedAt ?? this.deletedAt,
     total: total,
-    ebAccountUid: ebAccountUid == _unset
-        ? this.ebAccountUid
-        : ebAccountUid as String?,
-    ebConnectionId: ebConnectionId == _unset
-        ? this.ebConnectionId
-        : ebConnectionId as int?,
-    identificationHash: identificationHash == _unset
-        ? this.identificationHash
-        : identificationHash as String?,
-    identificationHashes: identificationHashes == _unset
-        ? this.identificationHashes
-        : identificationHashes as String?,
+    ebAccountUid: ebAccountUid == _unset ? this.ebAccountUid : ebAccountUid as String?,
+    ebConnectionId: ebConnectionId == _unset ? this.ebConnectionId : ebConnectionId as int?,
+    identificationHash: identificationHash == _unset ? this.identificationHash : identificationHash as String?,
+    identificationHashes: identificationHashes == _unset ? this.identificationHashes : identificationHashes as String?,
     iban: iban == _unset ? this.iban : iban as String?,
-    lastSyncAt: lastSyncAt == _unset
-        ? this.lastSyncAt
-        : lastSyncAt as DateTime?,
+    lastSyncAt: lastSyncAt == _unset ? this.lastSyncAt : lastSyncAt as DateTime?,
+    currencyCode: currencyCode == _unset ? this.currencyCode : currencyCode as String?,
   );
 
   static BankAccount fromJson(Map<String, Object?> json) => BankAccount(
@@ -151,18 +129,14 @@ class BankAccount extends BaseEntity {
     total: json[BankAccountFields.total] as num?,
     createdAt: DateTime.parse(json[BaseEntityFields.createdAt] as String),
     updatedAt: DateTime.parse(json[BaseEntityFields.updatedAt] as String),
-    deletedAt: json[BaseEntityFields.deletedAt] != null
-        ? DateTime.parse(json[BaseEntityFields.deletedAt] as String)
-        : null,
+    deletedAt: json[BaseEntityFields.deletedAt] != null ? DateTime.parse(json[BaseEntityFields.deletedAt] as String) : null,
     ebAccountUid: json[BankAccountFields.ebAccountUid] as String?,
     ebConnectionId: json[BankAccountFields.ebConnectionId] as int?,
     identificationHash: json[BankAccountFields.identificationHash] as String?,
-    identificationHashes:
-        json[BankAccountFields.identificationHashes] as String?,
+    identificationHashes: json[BankAccountFields.identificationHashes] as String?,
     iban: json[BankAccountFields.iban] as String?,
-    lastSyncAt: json[BankAccountFields.lastSyncAt] == null
-        ? null
-        : DateTime.parse(json[BankAccountFields.lastSyncAt] as String).toUtc(),
+    lastSyncAt: json[BankAccountFields.lastSyncAt] == null ? null : DateTime.parse(json[BankAccountFields.lastSyncAt] as String).toUtc(),
+    currencyCode: json[BankAccountFields.currencyCode] as String?,
   );
 
   Map<String, Object?> toJson({bool update = false, bool delete = false}) => {
@@ -175,9 +149,7 @@ class BankAccount extends BaseEntity {
     BankAccountFields.countNetWorth: countNetWorth && !delete ? 1 : 0,
     BankAccountFields.mainAccount: mainAccount && !delete ? 1 : 0,
     BankAccountFields.order: delete ? 0 : order,
-    BaseEntityFields.createdAt: update || delete
-        ? createdAt?.toIso8601String()
-        : DateTime.now().toIso8601String(),
+    BaseEntityFields.createdAt: update || delete ? createdAt?.toIso8601String() : DateTime.now().toIso8601String(),
     BaseEntityFields.updatedAt: DateTime.now().toIso8601String(),
     if (delete) BaseEntityFields.deletedAt: DateTime.now().toIso8601String(),
     BankAccountFields.ebAccountUid: ebAccountUid,
@@ -186,5 +158,6 @@ class BankAccount extends BaseEntity {
     BankAccountFields.identificationHashes: identificationHashes,
     BankAccountFields.iban: iban,
     BankAccountFields.lastSyncAt: lastSyncAt?.toUtc().toIso8601String(),
+    BankAccountFields.currencyCode: currencyCode,
   };
 }

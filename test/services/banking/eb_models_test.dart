@@ -1,3 +1,5 @@
+// dart format width=400
+
 import 'dart:convert';
 import 'dart:io';
 
@@ -11,16 +13,12 @@ import 'package:sossoldi/services/banking/enable_banking/models/eb_session.dart'
 import 'package:sossoldi/services/banking/enable_banking/models/eb_session_details.dart';
 import 'package:sossoldi/services/banking/enable_banking/models/eb_transactions_page.dart';
 
-Map<String, dynamic> _loadJson(String name) =>
-    jsonDecode(File('test/fixtures/$name').readAsStringSync())
-        as Map<String, dynamic>;
+Map<String, dynamic> _loadJson(String name) => jsonDecode(File('test/fixtures/$name').readAsStringSync()) as Map<String, dynamic>;
 
 void main() {
   group('EbApplication.fromJson', () {
     test('parses server-derived environment and available countries', () {
-      final application = EbApplication.fromJson(
-        _loadJson('eb_application.json'),
-      );
+      final application = EbApplication.fromJson(_loadJson('eb_application.json'));
 
       expect(application.kid, 'app-123');
       expect(application.environment.name, 'production');
@@ -31,15 +29,7 @@ void main() {
     });
 
     test('rejects an unknown server environment', () {
-      expect(
-        () => EbApplication.fromJson({
-          'name': 'Broken',
-          'kid': 'app-1',
-          'environment': 'STAGING',
-          'active': true,
-        }),
-        throwsFormatException,
-      );
+      expect(() => EbApplication.fromJson({'name': 'Broken', 'kid': 'app-1', 'environment': 'STAGING', 'active': true}), throwsFormatException);
     });
   });
 
@@ -125,13 +115,12 @@ void main() {
       expect(credit.bookingDate, DateTime.parse('2025-01-15'));
     });
 
-    test('debit transaction: negative signedAmount, fallback stableId', () {
+    test('debit transaction: negative amount and no stable ID fallback', () {
       final debit = page.transactions[1];
 
       expect(debit.signedAmount, -25.00);
       expect(debit.creditDebitIndicator, 'DBIT');
-      // entry_reference is null → stableId falls back to transaction_id.
-      expect(debit.stableId, 'tx-002');
+      expect(debit.stableId, isNull);
       expect(debit.isBooked, isFalse);
       expect(debit.bookingDate, isNull);
       expect(debit.note, 'supermarket');
@@ -154,17 +143,12 @@ void main() {
 
   group('EbSessionDetails.fromJson', () {
     test('parses the GET session response without a session_id', () {
-      final session = EbSessionDetails.fromJson(
-        _loadJson('eb_get_session.json'),
-      );
+      final session = EbSessionDetails.fromJson(_loadJson('eb_get_session.json'));
 
       expect(session.status, EbSessionStatus.authorized);
       expect(session.accountUids, ['497f6eca-6276-4993-bfeb-53cbbbba6f08']);
       expect(session.accountsData.single.identificationHash, 'primary-hash');
-      expect(session.accountsData.single.identificationHashes, [
-        'primary-hash',
-        'alternate-hash',
-      ]);
+      expect(session.accountsData.single.identificationHashes, ['primary-hash', 'alternate-hash']);
       expect(session.aspspName, 'Nordea');
       expect(session.aspspCountry, 'FI');
       expect(session.psuType, 'business');

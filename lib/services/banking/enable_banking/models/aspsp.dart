@@ -1,3 +1,5 @@
+// dart format width=400
+
 /// Sandbox metadata attached to an [Aspsp] in the `/aspsps` response.
 ///
 /// Only present for sandbox ASPSPs; captured defensively as the shape of the
@@ -7,9 +9,7 @@ class SandboxInfo {
 
   const SandboxInfo({this.users = const []});
 
-  static SandboxInfo fromJson(Map<String, dynamic> json) => SandboxInfo(
-    users: ((json['users'] as List?) ?? const []).cast<Map<String, dynamic>>(),
-  );
+  static SandboxInfo fromJson(Map<String, dynamic> json) => SandboxInfo(users: ((json['users'] as List?) ?? const []).cast<Map<String, dynamic>>());
 }
 
 /// A bank (ASPSP) as returned by `GET /aspsps`.
@@ -23,28 +23,18 @@ class Aspsp {
   final int? maximumConsentValidity;
   final bool beta;
   final SandboxInfo? sandbox;
+  final List<String> requiredPsuHeaders;
 
-  const Aspsp({
-    required this.name,
-    required this.country,
-    this.logo,
-    this.psuTypes = const [],
-    this.maximumConsentValidity,
-    this.beta = false,
-    this.sandbox,
-  });
+  const Aspsp({required this.name, required this.country, this.logo, this.psuTypes = const [], this.maximumConsentValidity, this.beta = false, this.sandbox, this.requiredPsuHeaders = const []});
 
   static Aspsp fromJson(Map<String, dynamic> json) => Aspsp(
     name: json['name'] as String,
     country: json['country'] as String,
     logo: json['logo'] as String?,
-    psuTypes: ((json['psu_types'] as List?) ?? const [])
-        .map((e) => e as String)
-        .toList(),
+    psuTypes: ((json['psu_types'] as List?) ?? const []).map((e) => e as String).toList(),
     maximumConsentValidity: json['maximum_consent_validity'] as int?,
     beta: (json['beta'] as bool?) ?? false,
-    sandbox: json['sandbox'] == null
-        ? null
-        : SandboxInfo.fromJson(json['sandbox'] as Map<String, dynamic>),
+    requiredPsuHeaders: ((json['required_psu_headers'] as List?) ?? const []).cast<String>(),
+    sandbox: json['sandbox'] == null ? null : SandboxInfo.fromJson(json['sandbox'] as Map<String, dynamic>),
   );
 }

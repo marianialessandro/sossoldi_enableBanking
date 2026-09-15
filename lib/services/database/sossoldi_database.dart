@@ -1,3 +1,5 @@
+// dart format width=400
+
 import 'dart:io';
 import 'dart:math'; // used for random number generation in demo data
 import 'dart:developer' as dev;
@@ -47,12 +49,7 @@ class SossoldiDatabase {
   Future<Database> _initDB(String filePath) async {
     final databasePath = await getDatabasesPath();
     final path = join(databasePath, filePath);
-    return await openDatabase(
-      path,
-      version: _migrationManager.latestVersion,
-      onCreate: _createDB,
-      onUpgrade: _upgradeDB,
-    );
+    return await openDatabase(path, version: _migrationManager.latestVersion, onCreate: _createDB, onUpgrade: _upgradeDB);
   }
 
   static Future _createDB(Database database, int version) async {
@@ -61,11 +58,7 @@ class SossoldiDatabase {
     await instance._migrationManager.migrate(database, 0, version);
   }
 
-  static Future _upgradeDB(
-    Database database,
-    int oldVersion,
-    int newVersion,
-  ) async {
+  static Future _upgradeDB(Database database, int oldVersion, int newVersion) async {
     await instance._migrationManager.migrate(database, oldVersion, newVersion);
   }
 
@@ -78,9 +71,7 @@ class SossoldiDatabase {
     await Directory(csvDir).create(recursive: true);
 
     // Get all table names
-    final List<Map<String, dynamic>> tables = await db.rawQuery(
-      "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'android_%'",
-    );
+    final List<Map<String, dynamic>> tables = await db.rawQuery("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'android_%'");
 
     List<List<dynamic>> allData = [];
     Set<String> allColumns = {'table_name'}; // Start with table_name column
@@ -105,10 +96,7 @@ class SossoldiDatabase {
         final List<Map<String, dynamic>> rows = await db.query(tableName);
 
         for (var row in rows) {
-          List<dynamic> csvRow = List.filled(
-            headers.length,
-            '',
-          ); // Initialize with empty strings
+          List<dynamic> csvRow = List.filled(headers.length, ''); // Initialize with empty strings
           csvRow[0] = tableName; // Set table name
 
           // Fill in values for existing columns
@@ -144,9 +132,7 @@ class SossoldiDatabase {
       }
 
       final String csvData = await file.readAsString();
-      final List<List<dynamic>> rows = const CsvToListConverter().convert(
-        csvData,
-      );
+      final List<List<dynamic>> rows = const CsvToListConverter().convert(csvData);
 
       if (rows.isEmpty) {
         throw Exception('CSV file is empty');
@@ -170,7 +156,13 @@ class SossoldiDatabase {
 
       // Import each table's data
       await db.transaction((txn) async {
-        for (var entry in tableData.entries) {
+        for (final table in ['bankRemoteTransaction', 'bankSyncState', 'bankSyncAudit']) {
+          await txn.delete(table);
+        }
+        final entries = tableData.entries.toList();
+        const bankRestoreOrder = {'bankRemoteTransaction': 1, 'bankSyncState': 2, 'bankSyncAudit': 3};
+        entries.sort((first, second) => (bankRestoreOrder[first.key] ?? 0).compareTo(bankRestoreOrder[second.key] ?? 0));
+        for (var entry in entries) {
           final String tableName = entry.key;
           final List<List<dynamic>> tableRows = entry.value;
 
@@ -193,10 +185,7 @@ class SossoldiDatabase {
                   }
                 }
               }
-              await txn.insert(
-                tableName,
-                BankingBackupPolicy.sanitizeForRestore(tableName, row),
-              );
+              await txn.insert(tableName, BankingBackupPolicy.sanitizeForRestore(tableName, row));
             }
             results[tableName] = true;
           } catch (e) {
@@ -262,39 +251,15 @@ class SossoldiDatabase {
     // First initialize some config stuff
     final rnd = Random();
     var accounts = [70, 71, 72];
-    var outNotes = [
-      'Grocery',
-      'Tolls',
-      'Toys',
-      'Boardgames',
-      'Concert',
-      'Clothing',
-      'Pizza',
-      'Drugs',
-      'Laundry',
-      'Taxes',
-      'Health insurance',
-      'Furniture',
-      'Car Fuel',
-      'Train',
-      'Amazon',
-      'Delivery',
-      'CHEK dividends',
-      'Babysitter',
-      'sono.pove.ro Fees',
-      'Quingentole trip',
-    ];
+    var outNotes = ['Grocery', 'Tolls', 'Toys', 'Boardgames', 'Concert', 'Clothing', 'Pizza', 'Drugs', 'Laundry', 'Taxes', 'Health insurance', 'Furniture', 'Car Fuel', 'Train', 'Amazon', 'Delivery', 'CHEK dividends', 'Babysitter', 'sono.pove.ro Fees', 'Quingentole trip'];
     var categories = [10, 11, 12, 13, 14];
     double maxAmountOfSingleTransaction = 250.00;
-    int dateInPastMaxRange =
-        (countOfGeneratedTransaction / 90).round() *
-        30; // we want simulate about 90 transactions per month
+    int dateInPastMaxRange = (countOfGeneratedTransaction / 90).round() * 30; // we want simulate about 90 transactions per month
     num fakeSalary = 5000;
     DateTime now = DateTime.now();
 
     // start building mega-query
-    const insertDemoTransactionsQuery =
-        '''INSERT INTO `transaction` (date, amount, type, note, idCategory, idBankAccount, idBankAccountTransfer, recurring, idRecurringTransaction, createdAt, updatedAt) VALUES ''';
+    const insertDemoTransactionsQuery = '''INSERT INTO `transaction` (date, amount, type, note, idCategory, idBankAccount, idBankAccountTransfer, recurring, idRecurringTransaction, createdAt, updatedAt) VALUES ''';
 
     // init a List with transaction values
     final List<String> demoTransactions = [];
@@ -307,8 +272,7 @@ class SossoldiDatabase {
       if (rnd.nextInt(10) < 8) {
         randomAmount = rnd.nextDouble() * (19.99 - 1) + 1;
       } else {
-        randomAmount =
-            rnd.nextDouble() * (maxAmountOfSingleTransaction - 100) + 100;
+        randomAmount = rnd.nextDouble() * (maxAmountOfSingleTransaction - 100) + 100;
       }
 
       var randomType = 'OUT';
@@ -316,20 +280,13 @@ class SossoldiDatabase {
       var randomNote = outNotes[rnd.nextInt(outNotes.length)];
       int? randomCategory = categories[rnd.nextInt(categories.length)];
       int? idBankAccountTransfer;
-      DateTime randomDate = now.subtract(
-        Duration(
-          days: rnd.nextInt(dateInPastMaxRange),
-          hours: rnd.nextInt(20),
-          minutes: rnd.nextInt(50),
-        ),
-      );
+      DateTime randomDate = now.subtract(Duration(days: rnd.nextInt(dateInPastMaxRange), hours: rnd.nextInt(20), minutes: rnd.nextInt(50)));
 
       if (i % (countOfGeneratedTransaction / 100) == 0) {
         // simulating a transfer every 1% of total iterations
         randomType = 'TRSF';
         randomNote = 'Transfer';
-        randomAccount =
-            70; // sender account is hardcoded with the one that receives our fake salary
+        randomAccount = 70; // sender account is hardcoded with the one that receives our fake salary
         randomCategory = null; // transfers have no category
         idBankAccountTransfer = accounts[rnd.nextInt(accounts.length)];
         randomAmount = (fakeSalary / 100) * 70;
@@ -341,40 +298,26 @@ class SossoldiDatabase {
       }
 
       // put generated transaction in our list
-      demoTransactions.add(
-        '''('$randomDate', ${randomAmount.toStringAsFixed(2)}, '$randomType', '$randomNote', $randomCategory, $randomAccount, $idBankAccountTransfer, 0, null, '$randomDate', '$randomDate')''',
-      );
+      demoTransactions.add('''('$randomDate', ${randomAmount.toStringAsFixed(2)}, '$randomType', '$randomNote', $randomCategory, $randomAccount, $idBankAccountTransfer, 0, null, '$randomDate', '$randomDate')''');
     }
 
     // add salary every month
     for (int i = 1; i < dateInPastMaxRange / 30; i++) {
       DateTime randomDate = now.subtract(Duration(days: 30 * i));
       var time = randomDate.toLocal();
-      DateTime salaryDateTime = DateTime(
-        time.year,
-        time.month,
-        27,
-        time.hour,
-        time.minute,
-        time.second,
-        time.millisecond,
-        time.microsecond,
-      );
-      demoTransactions.add(
-        '''('$salaryDateTime', $fakeSalary, 'IN', 'Salary', 16, 70, null, 0, null, '$salaryDateTime', '$salaryDateTime')''',
-      );
+      DateTime salaryDateTime = DateTime(time.year, time.month, 27, time.hour, time.minute, time.second, time.millisecond, time.microsecond);
+      demoTransactions.add('''('$salaryDateTime', $fakeSalary, 'IN', 'Salary', 16, 70, null, 0, null, '$salaryDateTime', '$salaryDateTime')''');
     }
 
     // finalize query and write!
-    await _database?.execute(
-      "$insertDemoTransactionsQuery ${demoTransactions.join(",")};",
-    );
+    await _database?.execute("$insertDemoTransactionsQuery ${demoTransactions.join(",")};");
   }
 
   Future resetDatabase() async {
+    final db = await database;
     // delete database
     try {
-      await _database?.transaction((txn) async {
+      await db.transaction((txn) async {
         var batch = txn.batch();
         // drop tables
         batch.execute('DROP TABLE IF EXISTS $bankAccountTable');
@@ -385,18 +328,25 @@ class SossoldiDatabase {
         batch.execute('DROP TABLE IF EXISTS $currencyTable');
         batch.execute('DROP TABLE IF EXISTS $bankAccountIdentityTable');
         batch.execute('DROP TABLE IF EXISTS $bankConnectionTable');
+        batch.execute('DROP TABLE IF EXISTS bankRemoteTransaction');
+        batch.execute('DROP TABLE IF EXISTS bankSyncState');
+        batch.execute('DROP TABLE IF EXISTS bankSyncAudit');
         await batch.commit();
       });
     } catch (error) {
       throw Exception('DbBase.resetDatabase: $error');
     }
-    await _createDB(_database!, _migrationManager.latestVersion);
+    await _createDB(db, _migrationManager.latestVersion);
   }
 
   Future clearDatabase() async {
+    final db = await database;
     try {
-      await _database?.transaction((txn) async {
+      await db.transaction((txn) async {
         var batch = txn.batch();
+        batch.delete('bankRemoteTransaction');
+        batch.delete('bankSyncState');
+        batch.delete('bankSyncAudit');
         batch.delete(bankAccountTable);
         batch.delete(transactionTable);
         batch.delete(recurringTransactionTable);

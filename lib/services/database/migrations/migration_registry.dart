@@ -1,3 +1,5 @@
+// dart format width=400
+
 /// Manages database migrations for the application.
 ///
 /// This registry maintains the list of all database migrations in the order they should be executed.
@@ -20,6 +22,7 @@ import '0006_migrate_icons_name.dart';
 import '0007_add_deleted_at.dart';
 import '0008_add_bank_consent_lifecycle.dart';
 import '0009_add_bank_provider_identity.dart';
+import '0010_add_bank_sync_integrity.dart';
 
 import '../migration_base.dart';
 
@@ -30,17 +33,7 @@ import '../migration_base.dart';
 /// When multiple migrations share the same version number, their position in this list
 /// determines which runs first.
 List<Migration> getMigrations() {
-  return [
-    InitialSchema(),
-    AccountNetWorth(),
-    RecurringTransactionType(),
-    AddCategoryOrder(),
-    AddAccountOrder(),
-    MigrateIconsName(),
-    AddDeletedAt(),
-    AddBankConsentLifecycle(),
-    AddBankProviderIdentity(),
-  ];
+  return [InitialSchema(), AccountNetWorth(), RecurringTransactionType(), AddCategoryOrder(), AddAccountOrder(), MigrateIconsName(), AddDeletedAt(), AddBankConsentLifecycle(), AddBankProviderIdentity(), AddBankSyncIntegrity()];
 }
 
 /// Returns the highest migration version number across all migrations.
@@ -53,8 +46,5 @@ int getLatestVersion() {
   final migrations = getMigrations();
   if (migrations.isEmpty) return 1;
 
-  return migrations.fold<int>(
-    1,
-    (max, migration) => migration.version > max ? migration.version : max,
-  );
+  return migrations.fold<int>(1, (max, migration) => migration.version > max ? migration.version : max);
 }

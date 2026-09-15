@@ -9,6 +9,7 @@ import 'package:http/testing.dart';
 import 'package:sossoldi/model/bank_account.dart';
 import 'package:sossoldi/model/bank_connection.dart';
 import 'package:sossoldi/services/banking/banking_exception.dart';
+import 'package:sossoldi/services/banking/banking_account.dart';
 import 'package:sossoldi/services/banking/banking_reference.dart';
 import 'package:sossoldi/services/banking/enable_banking/enable_banking_api.dart';
 import 'package:sossoldi/services/banking/enable_banking/enable_banking_auth.dart';
@@ -73,6 +74,7 @@ void main() {
               'accounts': [
                 {
                   'uid': 'account',
+                  'currency': 'EUR',
                   'identification_hash': ' primary ',
                   'identification_hashes': ['alias', ''],
                   'account_id': {'iban': 'IT00SYNTHETIC'},
@@ -89,6 +91,7 @@ void main() {
               'accounts_data': [
                 {
                   'uid': 'account',
+                  'currency': 'EUR',
                   'identification_hashes': ['alias'],
                 },
               ],
@@ -114,8 +117,15 @@ void main() {
     expect(staged.connection.providerId, 'enable_banking');
     final resumed = (await lifecycle().resumeAwaitingImports()).single;
     expect(resumed.details.accounts.single.identityKeys, {'alias'});
-    final active = await lifecycle().activateConnection(staged.connection.id!, [(remote: staged.createdConnection!.accounts.single, newAccount: const BankAccount(name: 'Imported', symbol: 'wallet', color: 1, startingValue: 0, active: true, countNetWorth: true, mainAccount: false, order: 0))]);
+    for (final currency in ['KWD', 'XXX', 'USD']) {
+      final unsupported = BankingAccount(reference: staged.createdConnection!.accounts.single.reference, currency: currency);
+      await expectLater(lifecycle().activateConnection(staged.connection.id!, [(remote: unsupported, newAccount: const BankAccount(name: 'Rejected', symbol: 'wallet', color: 1, startingValue: 999, active: true, countNetWorth: true, mainAccount: false, order: 0))]), throwsFormatException);
+      expect(await db.query(bankAccountTable), isEmpty);
+    }
+    final active = await lifecycle().activateConnection(staged.connection.id!, [(remote: staged.createdConnection!.accounts.single, newAccount: const BankAccount(name: 'Imported', symbol: 'wallet', color: 1, startingValue: 999, active: true, countNetWorth: true, mainAccount: false, order: 0))]);
     expect(active.status, BankConnectionStatus.active);
+    expect((await db.query(bankAccountTable)).single['startingValue'], 0);
+    expect((await db.query(bankAccountTable)).single['currencyCode'], 'EUR');
     final account = (await db.query(bankAccountTable)).single;
     expect(account[BankAccountFields.ebAccountUid], 'account');
     final identities = await db.query(bankAccountIdentityTable);

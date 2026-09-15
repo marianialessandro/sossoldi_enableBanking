@@ -19,6 +19,7 @@ import '../banking_authorization.dart';
 import '../banking_connection.dart';
 import '../banking_exception.dart';
 import '../banking_reference.dart';
+import '../sync/bank_money.dart';
 import 'bank_authorization_callback.dart';
 import 'bank_authorization_result.dart';
 import 'banking_platform_support.dart';
@@ -207,7 +208,15 @@ class BankConsentLifecycleService {
   Future<BankConnection> activateConnection(int connectionId, List<({BankingAccount remote, BankAccount? newAccount})> selections) async {
     final staged = await _connections.selectById(connectionId);
     if (selections.any((selection) => selection.remote.reference.providerId != staged.providerId)) throw BankingException(providerId: staged.providerId, failure: BankingFailure.rejected);
-    final links = selections.map((selection) => BankAccountLink(uid: selection.remote.reference.remoteId, identificationHashes: selection.remote.reference.identityKeys.map((value) => value.trim()).where((value) => value.isNotEmpty).toSet(), iban: selection.remote.iban, newAccount: selection.newAccount)).toList(growable: false);
+    for (final selection in selections) {
+      final scale = BankMoney.scales[selection.remote.currency];
+      if (scale == null || scale > 2) throw const FormatException('Remote account currency is not supported by the current display');
+    }
+    final links = selections
+        .map(
+          (selection) => BankAccountLink(uid: selection.remote.reference.remoteId, identificationHashes: selection.remote.reference.identityKeys.map((value) => value.trim()).where((value) => value.isNotEmpty).toSet(), iban: selection.remote.iban, newAccount: selection.newAccount?.id == null ? selection.newAccount?.copy(startingValue: 0) : selection.newAccount, currency: selection.remote.currency),
+        )
+        .toList(growable: false);
     final connection = await _connections.activateStagedConnection(connectionId, links);
     final pending = await _pendingStore.read();
     if (pending?.stagedConnectionId == connectionId) {

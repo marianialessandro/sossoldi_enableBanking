@@ -6,6 +6,20 @@ import 'package:sossoldi/model/bank_connection.dart';
 import 'package:sossoldi/services/banking/lifecycle/banking_backup_policy.dart';
 
 void main() {
+  test('backup preserves exact ledger values but never restores sync completion', () {
+    final row = {'accountId': 1, 'currency': 'EUR', 'openingMinor': '30589', 'balanceMinor': '23275', 'checkpoint': '2026-09-06', 'completedAt': '2026-09-07T12:00:00Z'};
+    final exported = BankingBackupPolicy.sanitizeForExport('bankSyncState', row);
+    final restored = BankingBackupPolicy.sanitizeForRestore('bankSyncState', row);
+    for (final value in [exported, restored]) {
+      expect(value['checkpoint'], isNull);
+      expect(value['completedAt'], isNull);
+      expect(value['openingMinor'], '30589');
+      expect(value['balanceMinor'], '23275');
+      expect(value['currency'], 'EUR');
+    }
+    expect(row['checkpoint'], '2026-09-06');
+  });
+
   test('export redacts usable sessions and transient account identifiers', () {
     final connection = BankingBackupPolicy.sanitizeForExport(bankConnectionTable, {BankConnectionFields.remoteConnectionId: 'secret-session', BankConnectionFields.pendingRemoteConnectionId: 'pending-session', BankConnectionFields.pendingAuthorizationId: 'authorization', BankConnectionFields.status: BankConnectionStatus.active.code});
     final account = BankingBackupPolicy.sanitizeForExport(bankAccountTable, {BankAccountFields.ebAccountUid: 'session-account-uid', BankAccountFields.lastSyncAt: '2026-09-01T00:00:00.000Z', BankAccountFields.identificationHash: 'stable-hash'});

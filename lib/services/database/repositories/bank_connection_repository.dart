@@ -149,7 +149,7 @@ class BankConnectionRepository {
           throw const BankReconciliationException(BankReconciliationFailure.identityCollision, 'Two remote accounts expose the same identification hash');
         }
         remoteHashes.addAll(hashes);
-        normalized.add(BankAccountLink(uid: link.uid.trim(), identificationHashes: hashes, iban: link.iban, newAccount: link.newAccount));
+        normalized.add(BankAccountLink(uid: link.uid.trim(), identificationHashes: hashes, iban: link.iban, newAccount: link.newAccount, currency: link.currency));
       }
 
       final identityRows = await txn.query(bankAccountIdentityTable, where: '${BankAccountIdentityFields.connectionId} = ?', whereArgs: [connectionId]);
@@ -157,6 +157,10 @@ class BankConnectionRepository {
       final selectedAccountIds = <int>{};
 
       for (final link in normalized) {
+        if (link.currency != null) {
+          final currencies = await txn.query('currency', where: 'mainCurrency = 1');
+          if (currencies.length != 1 || currencies.single['code'] != link.currency) throw const FormatException('Linked account must use the global currency');
+        }
         final matchingIds = link.identificationHashes.map((hash) => identityOwners[hash]).whereType<int>().toSet();
         if (matchingIds.length > 1) {
           throw const BankReconciliationException(BankReconciliationFailure.identityCollision, 'Stable hashes resolve to different local accounts');
@@ -185,7 +189,16 @@ class BankConnectionRepository {
         final sortedHashes = link.identificationHashes.toList()..sort();
         final changed = await txn.update(
           bankAccountTable,
-          {BankAccountFields.ebAccountUid: link.uid, BankAccountFields.ebConnectionId: connectionId, BankAccountFields.identificationHash: sortedHashes.first, BankAccountFields.identificationHashes: jsonEncode(sortedHashes), BankAccountFields.iban: link.iban, BankAccountFields.active: 1, BankAccountFields.updatedAt: DateTime.now().toUtc().toIso8601String()},
+          {
+            BankAccountFields.ebAccountUid: link.uid,
+            BankAccountFields.ebConnectionId: connectionId,
+            BankAccountFields.identificationHash: sortedHashes.first,
+            BankAccountFields.identificationHashes: jsonEncode(sortedHashes),
+            BankAccountFields.iban: link.iban,
+            if (link.currency != null) BankAccountFields.currencyCode: link.currency,
+            BankAccountFields.active: 1,
+            BankAccountFields.updatedAt: DateTime.now().toUtc().toIso8601String(),
+          },
           where: '${BankAccountFields.id} = ?',
           whereArgs: [accountId],
         );
@@ -288,6 +301,11 @@ class BankConnectionRepository {
   }
 
   Future<void> _unlinkAccount(DatabaseExecutor txn, int connectionId, int accountId) async {
+    // Retained transaction projections become ordinary editable manual data.
+    for (final table in ['bankRemoteTransaction', 'bankSyncState', 'bankSyncAudit']) {
+      await txn.delete(table, where: 'accountId = ?', whereArgs: [accountId]);
+    }
+
     await txn.delete(
       bankAccountIdentityTable,
       where:
@@ -295,6 +313,6 @@ class BankConnectionRepository {
           '${BankAccountIdentityFields.bankAccountId} = ?',
       whereArgs: [connectionId, accountId],
     );
-    await txn.update(bankAccountTable, {BankAccountFields.ebAccountUid: null, BankAccountFields.ebConnectionId: null, BankAccountFields.identificationHash: null, BankAccountFields.identificationHashes: null, BankAccountFields.lastSyncAt: null}, where: '${BankAccountFields.id} = ?', whereArgs: [accountId]);
+    await txn.update(bankAccountTable, {BankAccountFields.ebAccountUid: null, BankAccountFields.ebConnectionId: null, BankAccountFields.identificationHash: null, BankAccountFields.identificationHashes: null, BankAccountFields.lastSyncAt: null, BankAccountFields.currencyCode: null}, where: '${BankAccountFields.id} = ?', whereArgs: [accountId]);
   }
 }

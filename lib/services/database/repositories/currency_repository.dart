@@ -1,3 +1,5 @@
+// dart format width=400
+
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
 import '../../../model/currency.dart';
@@ -11,32 +13,20 @@ CurrencyRepository currencyRepository(Ref ref) {
 }
 
 class CurrencyRepository {
-  CurrencyRepository({required SossoldiDatabase database})
-    : _sossoldiDB = database;
+  CurrencyRepository({required SossoldiDatabase database}) : _sossoldiDB = database;
 
   final SossoldiDatabase _sossoldiDB;
 
   Future<Currency> getSelectedCurrency() async {
     final db = await _sossoldiDB.database;
 
-    final maps = await db.query(
-      currencyTable,
-      columns: CurrencyFields.allFields,
-      where: '${CurrencyFields.mainCurrency} = ?',
-      whereArgs: [1],
-    );
+    final maps = await db.query(currencyTable, columns: CurrencyFields.allFields, where: '${CurrencyFields.mainCurrency} = ?', whereArgs: [1]);
 
     if (maps.isNotEmpty) {
       return Currency.fromJson(maps.first);
     } else {
       //fallback
-      return const Currency(
-        id: 2,
-        symbol: '\$',
-        code: 'USD',
-        name: "United States Dollar",
-        mainCurrency: true,
-      );
+      return const Currency(id: 2, symbol: '\$', code: 'USD', name: "United States Dollar", mainCurrency: true);
     }
   }
 
@@ -56,12 +46,7 @@ class CurrencyRepository {
   Future<Currency> selectById(int id) async {
     final db = await _sossoldiDB.database;
 
-    final maps = await db.query(
-      currencyTable,
-      columns: CurrencyFields.allFields,
-      where: '${CurrencyFields.id} = ?',
-      whereArgs: [id],
-    );
+    final maps = await db.query(currencyTable, columns: CurrencyFields.allFields, where: '${CurrencyFields.id} = ?', whereArgs: [id]);
 
     if (maps.isNotEmpty) {
       return Currency.fromJson(maps.first);
@@ -83,28 +68,23 @@ class CurrencyRepository {
   Future<int> updateItem(Currency item) async {
     final db = await _sossoldiDB.database;
 
-    return db.update(
-      currencyTable,
-      item.toJson(),
-      where: '${CurrencyFields.id} = ?',
-      whereArgs: [item.id],
-    );
+    return db.update(currencyTable, item.toJson(), where: '${CurrencyFields.id} = ?', whereArgs: [item.id]);
   }
 
   Future<int> deleteById(int id) async {
     final db = await _sossoldiDB.database;
 
-    return await db.delete(
-      currencyTable,
-      where: '${CurrencyFields.id} = ?',
-      whereArgs: [id],
-    );
+    return await db.delete(currencyTable, where: '${CurrencyFields.id} = ?', whereArgs: [id]);
   }
 
   Future<void> changeMainCurrency(int id) async {
     final db = await _sossoldiDB.database;
 
-    await db.rawUpdate("UPDATE currency SET mainCurrency = 0");
-    await db.rawUpdate("UPDATE currency SET mainCurrency = 1 WHERE id = $id");
+    await db.transaction((txn) async {
+      final selected = await txn.query(currencyTable, where: 'id = ?', whereArgs: [id]);
+      if (selected.isEmpty) throw StateError('Currency does not exist');
+      await txn.rawUpdate('UPDATE currency SET mainCurrency = 0');
+      await txn.rawUpdate('UPDATE currency SET mainCurrency = 1 WHERE id = ?', [id]);
+    });
   }
 }

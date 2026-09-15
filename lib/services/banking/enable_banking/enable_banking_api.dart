@@ -1,5 +1,8 @@
+// dart format width=400
+
 import 'dart:convert';
 import 'dart:async';
+import 'dart:io' show HttpDate, HttpException;
 
 import 'package:http/http.dart' as http;
 
@@ -36,24 +39,11 @@ class EnableBankingApi {
   final http.Client _client;
   final Duration _timeout;
 
-  EnableBankingApi({
-    required EnableBankingAuth auth,
-    required EnableBankingCredentialsStore store,
-    http.Client? client,
-    Duration timeout = const Duration(seconds: 30),
-  }) : _auth = auth,
-       _store = store,
-       _client = client ?? http.Client(),
-       _timeout = timeout;
+  EnableBankingApi({required EnableBankingAuth auth, required EnableBankingCredentialsStore store, http.Client? client, Duration timeout = const Duration(seconds: 30)}) : _auth = auth, _store = store, _client = client ?? http.Client(), _timeout = timeout;
 
-  Map<String, String> _headersForToken(String token) => {
-    'Authorization': 'Bearer $token',
-    'Content-Type': 'application/json',
-    'Accept': 'application/json',
-  };
+  Map<String, String> _headersForToken(String token) => {'Authorization': 'Bearer $token', 'Content-Type': 'application/json', 'Accept': 'application/json'};
 
-  Future<Map<String, String>> _headers() async =>
-      _headersForToken(await _auth.getValidToken(_store));
+  Future<Map<String, String>> _headers() async => _headersForToken(await _auth.getValidToken(_store));
 
   void _check(http.Response response) {
     if (response.statusCode < 400) return;
@@ -67,26 +57,43 @@ class EnableBankingApi {
     final rawError = body?['error'];
     final code = switch (rawError) {
       String value => value,
-      Map<String, dynamic> value =>
-        _string(value['code']) ?? _string(value['error']),
+      Map<String, dynamic> value => _string(value['code']) ?? _string(value['error']),
       _ => _string(body?['code']) ?? _string(body?['error_code']),
     };
-    final rawMessage =
-        body?['message'] ??
-        (rawError is Map<String, dynamic> ? rawError['message'] : null) ??
-        body?['error_description'];
-    throw EnableBankingException(
-      statusCode: response.statusCode,
-      error: code,
-      message: rawMessage is String ? rawMessage : null,
-      kind: _failureKind(response.statusCode, code),
-    );
+    final rawMessage = body?['message'] ?? (rawError is Map<String, dynamic> ? rawError['message'] : null) ?? body?['error_description'];
+    throw EnableBankingException(statusCode: response.statusCode, error: code, message: rawMessage is String ? rawMessage : null, kind: _failureKind(response.statusCode, code), retryAfter: _retryAfter(response));
+  }
+
+  Duration? _retryAfter(http.Response response) {
+    final value = response.headers['retry-after'];
+    if (value == null) return null;
+    final seconds = int.tryParse(value);
+    if (seconds != null) return Duration(seconds: seconds < 0 ? 0 : seconds);
+    try {
+      final retryAt = HttpDate.parse(value);
+      DateTime serverDate;
+      try {
+        serverDate = HttpDate.parse(response.headers['date'] ?? '');
+      } on HttpException {
+        return const Duration(days: 365);
+      }
+      final delay = retryAt.difference(serverDate);
+      return delay.isNegative ? Duration.zero : delay;
+    } on HttpException {
+      return null;
+    }
   }
 
   String? _string(Object? value) => value is String ? value : null;
 
   EnableBankingFailureKind _failureKind(int statusCode, String? code) {
     switch (code?.toUpperCase()) {
+      case 'ASPSP_RATE_LIMIT_EXCEEDED':
+        return EnableBankingFailureKind.rateLimited;
+      case 'ASPSP_TIMEOUT':
+        return EnableBankingFailureKind.timeout;
+      case 'ASPSP_ERROR':
+        return EnableBankingFailureKind.server;
       case 'EXPIRED_SESSION':
         return EnableBankingFailureKind.sessionExpired;
       case 'REVOKED_SESSION':
@@ -99,6 +106,7 @@ class EnableBankingApi {
       401 || 403 => EnableBankingFailureKind.applicationAuthentication,
       404 => EnableBankingFailureKind.notFound,
       429 => EnableBankingFailureKind.rateLimited,
+      408 => EnableBankingFailureKind.timeout,
       >= 500 => EnableBankingFailureKind.server,
       _ => EnableBankingFailureKind.unknown,
     };
@@ -108,15 +116,9 @@ class EnableBankingApi {
     try {
       return await request.timeout(_timeout);
     } on TimeoutException {
-      throw const EnableBankingException(
-        message: 'Enable Banking request timed out',
-        kind: EnableBankingFailureKind.timeout,
-      );
+      throw const EnableBankingException(message: 'Enable Banking request timed out', kind: EnableBankingFailureKind.timeout);
     } on http.ClientException catch (error) {
-      throw EnableBankingException(
-        message: error.message,
-        kind: EnableBankingFailureKind.network,
-      );
+      throw EnableBankingException(message: error.message, kind: EnableBankingFailureKind.network);
     }
   }
 
@@ -124,68 +126,40 @@ class EnableBankingApi {
     try {
       return jsonDecode(response.body) as Map<String, dynamic>;
     } catch (error) {
-      throw EnableBankingException(
-        statusCode: response.statusCode,
-        message: 'Malformed Enable Banking response: $error',
-        kind: EnableBankingFailureKind.invalidResponse,
-      );
+      throw EnableBankingException(statusCode: response.statusCode, message: 'Malformed Enable Banking response: $error', kind: EnableBankingFailureKind.invalidResponse);
     }
   }
 
-  Future<Map<String, dynamic>> _get(
-    String path, [
-    Map<String, String>? query,
-  ]) async {
-    final uri = Uri.parse('$_kBaseUrl$path').replace(
-      queryParameters: query != null && query.isNotEmpty ? query : null,
-    );
-    final response = await _request(
-      _client.get(uri, headers: await _headers()),
-    );
+  Future<Map<String, dynamic>> _get(String path, [Map<String, String>? query]) async {
+    final uri = Uri.parse('$_kBaseUrl$path').replace(queryParameters: query != null && query.isNotEmpty ? query : null);
+    final response = await _request(_client.get(uri, headers: await _headers()));
     _check(response);
     return _decodeObject(response);
   }
 
   Future<Map<String, dynamic>> _getWithToken(String path, String token) async {
     final uri = Uri.parse('$_kBaseUrl$path');
-    final response = await _request(
-      _client.get(uri, headers: _headersForToken(token)),
-    );
+    final response = await _request(_client.get(uri, headers: _headersForToken(token)));
     _check(response);
     return _decodeObject(response);
   }
 
-  Future<Map<String, dynamic>> _post(
-    String path,
-    Map<String, dynamic> body,
-  ) async {
+  Future<Map<String, dynamic>> _post(String path, Map<String, dynamic> body) async {
     final uri = Uri.parse('$_kBaseUrl$path');
-    final response = await _request(
-      _client.post(uri, headers: await _headers(), body: jsonEncode(body)),
-    );
+    final response = await _request(_client.post(uri, headers: await _headers(), body: jsonEncode(body)));
     _check(response);
     return _decodeObject(response);
   }
 
   Future<void> _delete(String path) async {
     final uri = Uri.parse('$_kBaseUrl$path');
-    final response = await _request(
-      _client.delete(uri, headers: await _headers()),
-    );
+    final response = await _request(_client.delete(uri, headers: await _headers()));
     _check(response);
   }
 
-  Future<List<Aspsp>> getAspsps({
-    String? country,
-    String psuType = 'personal',
-  }) async {
-    final json = await _get('/aspsps', {
-      'country': ?country,
-      'psu_type': psuType,
-    });
-    return (json['aspsps'] as List)
-        .map((e) => Aspsp.fromJson(e as Map<String, dynamic>))
-        .toList();
+  Future<List<Aspsp>> getAspsps({String? country, String psuType = 'personal'}) async {
+    final json = await _get('/aspsps', {'country': ?country, 'psu_type': psuType});
+    return (json['aspsps'] as List).map((e) => Aspsp.fromJson(e as Map<String, dynamic>)).toList();
   }
 
   Future<EbApplication> getApplication() async {
@@ -194,38 +168,21 @@ class EnableBankingApi {
   }
 
   /// Verifies a candidate app-id/key pair before it is persisted.
-  Future<EbApplication> verifyApplicationCredentials({
-    required String appId,
-    required String privateKeyPem,
-  }) async {
+  Future<EbApplication> verifyApplicationCredentials({required String appId, required String privateKeyPem}) async {
     final token = _auth.buildJwt(appId: appId, privateKeyPem: privateKeyPem);
     final json = await _getWithToken('/application', token);
     final application = EbApplication.fromJson(json);
     if (application.kid != appId) {
-      throw const EnableBankingException(
-        message: 'The application returned a different key ID',
-      );
+      throw const EnableBankingException(message: 'The application returned a different key ID');
     }
     _auth.clearCache();
     return application;
   }
 
-  Future<EbAuthorization> startAuthorization({
-    required String aspspName,
-    required String aspspCountry,
-    required String state,
-    required DateTime validUntil,
-    String psuType = 'personal',
-    String? language,
-    String redirectUri = kEbRedirectUri,
-  }) async {
+  Future<EbAuthorization> startAuthorization({required String aspspName, required String aspspCountry, required String state, required DateTime validUntil, String psuType = 'personal', String? language, String redirectUri = kEbRedirectUri}) async {
     validateEnableBankingRedirect(redirectUri);
     final json = await _post('/auth', {
-      'access': {
-        'valid_until': validUntil.toUtc().toIso8601String(),
-        'balances': true,
-        'transactions': true,
-      },
+      'access': {'valid_until': validUntil.toUtc().toIso8601String(), 'balances': true, 'transactions': true},
       'aspsp': {'name': aspspName, 'country': aspspCountry},
       'state': state,
       'redirect_url': redirectUri,
@@ -249,39 +206,35 @@ class EnableBankingApi {
     await _delete('/sessions/${Uri.encodeComponent(sessionId)}');
   }
 
-  Future<EbAccount> getAccount(String accountUid) async {
-    final json = await _get(
-      '/accounts/${Uri.encodeComponent(accountUid)}/details',
-    );
-    return EbAccount.fromJson(json);
+  Future<Map<String, dynamic>> _getAccountData(String path, Map<String, String> psuHeaders, [Map<String, String>? query]) async {
+    if (psuHeaders.entries.any((entry) => !RegExp(r'^psu-[a-z0-9-]+$').hasMatch(entry.key.toLowerCase()) || entry.value.trim().isEmpty || entry.value.contains(RegExp(r'[\r\n]')))) {
+      throw const FormatException('Invalid PSU header');
+    }
+    final uri = Uri.parse('$_kBaseUrl$path').replace(queryParameters: query);
+    final response = await _request(_client.get(uri, headers: {...await _headers(), ...psuHeaders}));
+    _check(response);
+    final json = _decodeObject(response);
+    try {
+      json['_server_date'] = HttpDate.parse(response.headers['date'] ?? '').toUtc().toIso8601String();
+    } on HttpException {
+      json.remove('_server_date');
+    }
+    return json;
   }
 
-  Future<List<EbBalance>> getBalances(String accountUid) async {
-    final json = await _get(
-      '/accounts/${Uri.encodeComponent(accountUid)}/balances',
-    );
-    return (json['balances'] as List)
-        .map((e) => EbBalance.fromJson(e as Map<String, dynamic>))
-        .toList();
+  Future<EbAccount> getAccount(String accountUid, {Map<String, String> psuHeaders = const {}}) async {
+    final json = await _getAccountData('/accounts/${Uri.encodeComponent(accountUid)}/details', psuHeaders);
+    return EbAccount.fromJson({...json, 'uid': json['uid'] ?? accountUid});
+  }
+
+  Future<List<EbBalance>> getBalances(String accountUid, {Map<String, String> psuHeaders = const {}}) async {
+    final json = await _getAccountData('/accounts/${Uri.encodeComponent(accountUid)}/balances', psuHeaders);
+    return (json['balances'] as List).map((e) => EbBalance.fromJson(e as Map<String, dynamic>)).toList();
   }
 
   /// Treats [dateFrom] and [dateTo] as calendar dates, preserving their year, month and day without timezone conversion.
-  Future<EbTransactionsPage> getTransactions(
-    String accountUid, {
-    DateTime? dateFrom,
-    DateTime? dateTo,
-    String? continuationKey,
-    String? transactionStatus,
-  }) async {
-    final json = await _get(
-      '/accounts/${Uri.encodeComponent(accountUid)}/transactions',
-      {
-        if (dateFrom != null) 'date_from': _formatDate(dateFrom),
-        if (dateTo != null) 'date_to': _formatDate(dateTo),
-        'continuation_key': ?continuationKey,
-        'transaction_status': ?transactionStatus,
-      },
-    );
-    return EbTransactionsPage.fromJson(json);
+  Future<EbTransactionsPage> getTransactions(String accountUid, {DateTime? dateFrom, DateTime? dateTo, String? continuationKey, String? transactionStatus, String? strategy, Map<String, String> psuHeaders = const {}, bool collectRejectedRecords = false}) async {
+    final json = await _getAccountData('/accounts/${Uri.encodeComponent(accountUid)}/transactions', psuHeaders, {if (dateFrom != null) 'date_from': _formatDate(dateFrom), if (dateTo != null) 'date_to': _formatDate(dateTo), 'continuation_key': ?continuationKey, 'transaction_status': ?transactionStatus, 'strategy': ?strategy});
+    return EbTransactionsPage.fromJson(json, collectRejectedRecords: collectRejectedRecords);
   }
 }

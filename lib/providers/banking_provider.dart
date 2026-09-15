@@ -20,6 +20,10 @@ import '../services/banking/lifecycle/banking_platform_support.dart';
 import '../services/banking/lifecycle/pending_bank_authorization_store.dart';
 import '../services/database/repositories/bank_connection_repository.dart';
 
+import '../services/banking/sync/bank_sync_service.dart';
+import '../services/database/repositories/bank_sync_repository.dart';
+import '../services/database/sossoldi_database.dart';
+
 part 'banking_provider.g.dart';
 
 @Riverpod(keepAlive: true)
@@ -134,3 +138,9 @@ class EnableBankingSettings extends _$EnableBankingSettings {
     });
   }
 }
+
+@Riverpod(keepAlive: true)
+BankSyncRepository bankSyncRepository(Ref ref) => BankSyncRepository(database: ref.watch(databaseProvider));
+
+@Riverpod(keepAlive: true)
+BankSyncService bankSyncService(Ref ref) => BankSyncService(accountData: ref.watch(bankAccountDataSourceProvider), institutions: ref.watch(bankInstitutionDirectoryProvider), providerId: ref.watch(bankingServiceProvider).id, repository: ref.watch(bankSyncRepositoryProvider), readContext: ref.watch(bankAuthorizationContextReaderProvider));

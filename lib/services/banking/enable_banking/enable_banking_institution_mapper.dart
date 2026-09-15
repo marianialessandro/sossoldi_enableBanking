@@ -21,5 +21,6 @@ class EnableBankingInstitutionMapper {
     maximumConsentDuration: value.maximumConsentValidity == null ? null : Duration(seconds: value.maximumConsentValidity!),
     isSandbox: value.sandbox != null,
     isBeta: value.beta,
+    requiredPsuHeaders: value.requiredPsuHeaders,
   );
 }

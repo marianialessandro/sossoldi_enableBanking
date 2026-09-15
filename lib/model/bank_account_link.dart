@@ -7,6 +7,7 @@ class BankAccountLink {
   final Set<String> identificationHashes;
   final String? iban;
   final BankAccount? newAccount;
+  final String? currency;
 
-  const BankAccountLink({required this.uid, required this.identificationHashes, this.iban, this.newAccount});
+  const BankAccountLink({required this.uid, required this.identificationHashes, this.iban, this.newAccount, this.currency});
 }

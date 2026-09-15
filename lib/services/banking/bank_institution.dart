@@ -12,6 +12,7 @@ class BankInstitution {
   final Duration? maximumConsentDuration;
   final bool isSandbox;
   final bool isBeta;
+  final List<String> requiredPsuHeaders;
 
-  BankInstitution({required this.providerId, required this.id, required this.name, required this.country, this.logoUri, Set<BankingCustomerType> customerTypes = const {}, this.maximumConsentDuration, this.isSandbox = false, this.isBeta = false}) : customerTypes = Set.unmodifiable(customerTypes);
+  BankInstitution({required this.providerId, required this.id, required this.name, required this.country, this.logoUri, Set<BankingCustomerType> customerTypes = const {}, this.maximumConsentDuration, this.isSandbox = false, this.isBeta = false, List<String> requiredPsuHeaders = const []}) : customerTypes = Set.unmodifiable(customerTypes), requiredPsuHeaders = List.unmodifiable(requiredPsuHeaders);
 }
