@@ -243,11 +243,7 @@ class BankConsentLifecycleService {
 
   Future<void> _rejectStagedConnection(BankConnection connection, BankConnectionStatus failedStatus) async {
     final id = connection.id!;
-    if (failedStatus == BankConnectionStatus.reauthRequired) {
-      await _connections.markStatus(id, failedStatus);
-      return;
-    }
-    if (connection.remoteConnectionId == null) {
+    if (connection.remoteConnectionId == null || failedStatus == BankConnectionStatus.reauthRequired) {
       await _connections.failStagedConnection(id, failedStatus);
     } else {
       await _connections.discardStagedConnection(id);

@@ -295,6 +295,6 @@ class BankConnectionRepository {
           '${BankAccountIdentityFields.bankAccountId} = ?',
       whereArgs: [connectionId, accountId],
     );
-    await txn.update(bankAccountTable, {BankAccountFields.ebAccountUid: null, BankAccountFields.ebConnectionId: null, BankAccountFields.identificationHash: null, BankAccountFields.identificationHashes: null, BankAccountFields.lastSyncAt: null}, where: '${BankAccountFields.id} = ?', whereArgs: [accountId]);
+    await txn.update(bankAccountTable, {BankAccountFields.ebAccountUid: null, BankAccountFields.ebConnectionId: null, BankAccountFields.identificationHash: null, BankAccountFields.identificationHashes: null, BankAccountFields.iban: null, BankAccountFields.lastSyncAt: null}, where: '${BankAccountFields.id} = ?', whereArgs: [accountId]);
   }
 }

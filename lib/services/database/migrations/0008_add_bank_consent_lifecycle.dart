@@ -16,6 +16,7 @@ class AddBankConsentLifecycle extends Migration {
     await db.execute('''
       CREATE TABLE `$bankConnectionTable` (
         `${BankConnectionFields.id}` INTEGER PRIMARY KEY AUTOINCREMENT,
+        `${BankConnectionFields.providerId}` TEXT NOT NULL,
         `${BankConnectionFields.institutionName}` TEXT NOT NULL,
         `${BankConnectionFields.institutionCountry}` TEXT NOT NULL,
         `${BankConnectionFields.applicationId}` TEXT NOT NULL,
@@ -38,13 +39,13 @@ class AddBankConsentLifecycle extends Migration {
     ''');
     await db.execute('''
       CREATE UNIQUE INDEX `idx_bank_connection_session`
-      ON `$bankConnectionTable` (`${BankConnectionFields.remoteConnectionId}`)
+      ON `$bankConnectionTable` (`${BankConnectionFields.providerId}`, `${BankConnectionFields.remoteConnectionId}`)
       WHERE `${BankConnectionFields.remoteConnectionId}` IS NOT NULL
     ''');
     await db.execute('''
       CREATE UNIQUE INDEX `idx_bank_connection_pending_authorization`
       ON `$bankConnectionTable`
-      (`${BankConnectionFields.pendingAuthorizationId}`)
+      (`${BankConnectionFields.providerId}`, `${BankConnectionFields.pendingAuthorizationId}`)
       WHERE `${BankConnectionFields.pendingAuthorizationId}` IS NOT NULL
     ''');
 

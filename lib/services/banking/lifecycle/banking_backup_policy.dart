@@ -13,7 +13,10 @@ class BankingBackupPolicy {
       sanitized[BankConnectionFields.pendingRemoteConnectionId] = null;
       sanitized[BankConnectionFields.pendingAuthorizationId] = null;
       sanitized[BankConnectionFields.pendingValidUntil] = null;
-      sanitized[BankConnectionFields.status] = BankConnectionStatus.reauthRequired.code;
+      final status = sanitized[BankConnectionFields.status];
+      if (status != BankConnectionStatus.revoked.code && status != BankConnectionStatus.disconnected.code) {
+        sanitized[BankConnectionFields.status] = BankConnectionStatus.reauthRequired.code;
+      }
     } else if (table == bankAccountTable) {
       sanitized[BankAccountFields.ebAccountUid] = null;
       sanitized[BankAccountFields.lastSyncAt] = null;

@@ -25,4 +25,15 @@ void main() {
     expect(restored[BankConnectionFields.remoteConnectionId], isNull);
     expect(restored[BankConnectionFields.status], BankConnectionStatus.reauthRequired.code);
   });
+
+  test('terminal connection states remain terminal after export and restore', () {
+    for (final status in [BankConnectionStatus.revoked, BankConnectionStatus.disconnected]) {
+      final exported = BankingBackupPolicy.sanitizeForExport(bankConnectionTable, {BankConnectionFields.remoteConnectionId: 'stale-session', BankConnectionFields.status: status.code});
+      final restored = BankingBackupPolicy.sanitizeForRestore(bankConnectionTable, exported);
+
+      expect(exported[BankConnectionFields.remoteConnectionId], isNull);
+      expect(exported[BankConnectionFields.status], status.code);
+      expect(restored[BankConnectionFields.status], status.code);
+    }
+  });
 }

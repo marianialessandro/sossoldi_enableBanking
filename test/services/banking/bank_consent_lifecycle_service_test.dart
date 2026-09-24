@@ -163,6 +163,40 @@ void main() {
     expect(pending.value, isNull);
   });
 
+  test('reauth-required staged import clears pending state and is not resumed again', () async {
+    await service().startAuthorization(api.aspsps.single);
+    final staged = await service().completeCallback(BankAuthorizationCallback(code: 'code', state: pending.value!.state));
+    api.getSessionFailure = const BankingException(providerId: 'alternative', failure: BankingFailure.authentication);
+
+    expect(await service().resumeAwaitingImports(), isEmpty);
+
+    final rejected = await repository.selectById(staged.connection.id!);
+    expect(rejected.status, BankConnectionStatus.reauthRequired);
+    expect(rejected.pendingRemoteConnectionId, isNull);
+    expect(rejected.pendingAuthorizationId, isNull);
+    expect(rejected.pendingValidUntil, isNull);
+    expect(await repository.selectAwaitingImport(), isEmpty);
+    expect(pending.value, isNull);
+  });
+
+  test('reauth-required staged reconnect keeps the previous session and clears pending state', () async {
+    final connection = await repository.insert(BankConnection(providerId: 'alternative', institutionName: 'Test Bank', institutionCountry: 'IT', applicationId: 'app-id', remoteConnectionId: 'session-old', validUntil: now.add(const Duration(days: 1)), status: BankConnectionStatus.active));
+    await service().startAuthorization(api.aspsps.single, reconnectConnectionId: connection.id);
+    await service().completeCallback(BankAuthorizationCallback(code: 'code', state: pending.value!.state));
+    api.getSessionFailure = const BankingException(providerId: 'alternative', failure: BankingFailure.forbidden);
+
+    expect(await service().resumeAwaitingImports(), isEmpty);
+
+    final rejected = await repository.selectById(connection.id!);
+    expect(rejected.status, BankConnectionStatus.reauthRequired);
+    expect(rejected.remoteConnectionId, 'session-old');
+    expect(rejected.pendingRemoteConnectionId, isNull);
+    expect(rejected.pendingAuthorizationId, isNull);
+    expect(rejected.pendingValidUntil, isNull);
+    expect(await repository.selectAwaitingImport(), isEmpty);
+    expect(pending.value, isNull);
+  });
+
   test('retryable callback failure remains pending and can be retried', () async {
     await service().startAuthorization(api.aspsps.single);
     final callback = BankAuthorizationCallback(code: 'code', state: pending.value!.state);

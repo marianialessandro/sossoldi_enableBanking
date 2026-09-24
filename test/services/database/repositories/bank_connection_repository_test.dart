@@ -49,7 +49,7 @@ void main() {
     final staged = await _stage(repository, authorizationId: 'auth-1');
     final first = await repository.activateStagedConnection(staged.id!, [
       BankAccountLink(uid: 'uid-old', identificationHashes: const {'hash-main', 'hash-alias'}, iban: 'IT00TEST', newAccount: _draft('Checking', startingValue: 42)),
-      BankAccountLink(uid: 'uid-removed', identificationHashes: const {'hash-removed'}, newAccount: _draft('Removed')),
+      BankAccountLink(uid: 'uid-removed', identificationHashes: const {'hash-removed'}, iban: 'IT00REMOVED', newAccount: _draft('Removed')),
     ]);
     final originalRows = await db.query(bankAccountTable, where: '${BankAccountFields.ebConnectionId} = ?', whereArgs: [first.id], orderBy: BankAccountFields.id);
     final originalId = originalRows.first[BankAccountFields.id] as int;
@@ -77,6 +77,7 @@ void main() {
     final removed = (await db.query(bankAccountTable, where: '${BankAccountFields.id} = ?', whereArgs: [removedId])).single;
     expect(removed[BankAccountFields.ebConnectionId], isNull);
     expect(removed[BankAccountFields.ebAccountUid], isNull);
+    expect(removed[BankAccountFields.iban], isNull);
     expect(await db.query(bankAccountTable), hasLength(3));
   });
 

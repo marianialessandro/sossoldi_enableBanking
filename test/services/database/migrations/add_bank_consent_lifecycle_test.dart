@@ -27,25 +27,29 @@ void main() {
     await databaseFactory.deleteDatabase(dbPath);
   });
 
-  test('v8 upgrade namespaces existing sessions without changing their IDs', () async {
-    final v8 = await databaseFactory.openDatabase(dbPath, options: OpenDatabaseOptions(version: 8, onCreate: (db, version) => manager.migrate(db, 0, version)));
-    final row = {BankConnectionFields.institutionName: 'Bank', BankConnectionFields.institutionCountry: 'IT', BankConnectionFields.applicationId: 'app', BankConnectionFields.remoteConnectionId: 'session', BankConnectionFields.status: 'ACTIVE', BankConnectionFields.createdAt: '2026-09-01T00:00:00Z', BankConnectionFields.updatedAt: '2026-09-01T00:00:00Z'};
-    final original = await v8.insert(bankConnectionTable, row);
-    await v8.close();
-    final upgraded = await databaseFactory.openDatabase(
+  test('v8 schema namespaces sessions by provider', () async {
+    expect(manager.latestVersion, 8);
+    final database = await databaseFactory.openDatabase(
       dbPath,
-      options: OpenDatabaseOptions(version: manager.latestVersion, onUpgrade: manager.migrate),
+      options: OpenDatabaseOptions(version: manager.latestVersion, onCreate: (db, version) => manager.migrate(db, 0, version)),
     );
+    final row = {
+      BankConnectionFields.providerId: 'enable_banking',
+      BankConnectionFields.institutionName: 'Bank',
+      BankConnectionFields.institutionCountry: 'IT',
+      BankConnectionFields.applicationId: 'app',
+      BankConnectionFields.remoteConnectionId: 'session',
+      BankConnectionFields.status: 'ACTIVE',
+      BankConnectionFields.createdAt: '2026-09-01T00:00:00Z',
+      BankConnectionFields.updatedAt: '2026-09-01T00:00:00Z',
+    };
     try {
-      final restored = BankConnection.fromJson((await upgraded.query(bankConnectionTable)).single);
-      expect(restored.id, original);
-      expect(restored.providerId, 'enable_banking');
-      expect(restored.remoteConnectionId, 'session');
-      await upgraded.insert(bankConnectionTable, {...row, BankConnectionFields.providerId: 'alternative'});
-      await expectLater(upgraded.insert(bankConnectionTable, row), throwsA(isA<DatabaseException>()));
-      expect(await upgraded.query(bankConnectionTable), hasLength(2));
+      await database.insert(bankConnectionTable, row);
+      await database.insert(bankConnectionTable, {...row, BankConnectionFields.providerId: 'alternative'});
+      await expectLater(database.insert(bankConnectionTable, row), throwsA(isA<DatabaseException>()));
+      expect(await database.query(bankConnectionTable), hasLength(2));
     } finally {
-      await upgraded.close();
+      await database.close();
     }
   });
 
@@ -80,7 +84,16 @@ void main() {
       options: OpenDatabaseOptions(version: manager.latestVersion, onCreate: (database, version) => manager.migrate(database, 0, version)),
     );
     final now = '2026-01-01T00:00:00.000Z';
-    final connectionId = await db.insert(bankConnectionTable, {BankConnectionFields.institutionName: 'Bank', BankConnectionFields.institutionCountry: 'IT', BankConnectionFields.applicationId: 'app', BankConnectionFields.status: BankConnectionStatus.awaitingImport.code, BankConnectionFields.psuType: 'personal', BankConnectionFields.createdAt: now, BankConnectionFields.updatedAt: now});
+    final connectionId = await db.insert(bankConnectionTable, {
+      BankConnectionFields.providerId: 'enable_banking',
+      BankConnectionFields.institutionName: 'Bank',
+      BankConnectionFields.institutionCountry: 'IT',
+      BankConnectionFields.applicationId: 'app',
+      BankConnectionFields.status: BankConnectionStatus.awaitingImport.code,
+      BankConnectionFields.psuType: 'personal',
+      BankConnectionFields.createdAt: now,
+      BankConnectionFields.updatedAt: now,
+    });
     final first = await db.insert(bankAccountTable, _accountRow('First'));
     final second = await db.insert(bankAccountTable, _accountRow('Second'));
     await db.insert(bankAccountIdentityTable, {BankAccountIdentityFields.connectionId: connectionId, BankAccountIdentityFields.bankAccountId: first, BankAccountIdentityFields.identificationHash: 'stable-hash'});
