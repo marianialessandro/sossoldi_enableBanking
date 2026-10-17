@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import '../storage/banking_secure_storage.dart';
 import 'enable_banking_config.dart';
 import 'enable_banking_exception.dart';
 
@@ -28,14 +29,7 @@ class EnableBankingCredentialsStore {
   final FlutterSecureStorage _storage;
 
   const EnableBankingCredentialsStore({FlutterSecureStorage? storage})
-    : _storage =
-          storage ??
-          const FlutterSecureStorage(
-            aOptions: AndroidOptions(encryptedSharedPreferences: true),
-            iOptions: IOSOptions(
-              accessibility: KeychainAccessibility.first_unlock,
-            ),
-          );
+    : _storage = storage ?? bankingSecureStorage;
 
   Future<void> saveCredentials({
     required String appId,
