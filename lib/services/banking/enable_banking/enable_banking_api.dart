@@ -51,8 +51,23 @@ class EnableBankingApi {
     'Accept': 'application/json',
   };
 
-  Future<Map<String, String>> _headers() async =>
-      _headersForToken(await _auth.getValidToken(_store));
+  Future<({Map<String, String> headers, int revision})> _capability({
+    int? expectedRevision,
+  }) async {
+    final revision = _store.credentialRevision;
+    _checkRevision(expectedRevision ?? revision);
+    final token = await _auth.getValidToken(_store);
+    _checkRevision(revision);
+    return (headers: _headersForToken(token), revision: revision);
+  }
+
+  void _checkRevision(int revision) {
+    if (revision != _store.credentialRevision) {
+      throw const EnableBankingAuthException(
+        'Credentials changed before dispatch',
+      );
+    }
+  }
 
   void _check(http.Response response) {
     if (response.statusCode < 400) return;
@@ -166,8 +181,10 @@ class EnableBankingApi {
     final uri = Uri.parse('$_kBaseUrl$path').replace(
       queryParameters: query != null && query.isNotEmpty ? query : null,
     );
+    final capability = await _capability();
+    _checkRevision(capability.revision);
     final response = await _request(
-      _client.get(uri, headers: await _headers()),
+      _client.get(uri, headers: capability.headers),
     );
     _check(response);
     return _decodeObject(response);
@@ -187,17 +204,23 @@ class EnableBankingApi {
     Map<String, dynamic> body,
   ) async {
     final uri = Uri.parse('$_kBaseUrl$path');
+    final capability = await _capability();
+    _checkRevision(capability.revision);
     final response = await _request(
-      _client.post(uri, headers: await _headers(), body: jsonEncode(body)),
+      _client.post(uri, headers: capability.headers, body: jsonEncode(body)),
     );
     _check(response);
     return _decodeObject(response);
   }
 
-  Future<void> _delete(String path) async {
+  Future<void> _delete(String path, {int? expectedCredentialRevision}) async {
     final uri = Uri.parse('$_kBaseUrl$path');
+    final capability = await _capability(
+      expectedRevision: expectedCredentialRevision,
+    );
+    _checkRevision(capability.revision);
     final response = await _request(
-      _client.delete(uri, headers: await _headers()),
+      _client.delete(uri, headers: capability.headers),
     );
     _check(response);
   }
@@ -272,8 +295,14 @@ class EnableBankingApi {
     return EbSessionDetails.fromJson(json);
   }
 
-  Future<void> deleteSession(String sessionId) async {
-    await _delete('/sessions/${Uri.encodeComponent(sessionId)}');
+  Future<void> deleteSession(
+    String sessionId, {
+    int? expectedCredentialRevision,
+  }) async {
+    await _delete(
+      '/sessions/${Uri.encodeComponent(sessionId)}',
+      expectedCredentialRevision: expectedCredentialRevision,
+    );
   }
 
   Future<Map<String, dynamic>> _getAccountData(
@@ -290,8 +319,10 @@ class EnableBankingApi {
       throw const FormatException('Invalid PSU header');
     }
     final uri = Uri.parse('$_kBaseUrl$path').replace(queryParameters: query);
+    final capability = await _capability();
+    _checkRevision(capability.revision);
     final response = await _request(
-      _client.get(uri, headers: {...await _headers(), ...psuHeaders}),
+      _client.get(uri, headers: {...capability.headers, ...psuHeaders}),
     );
     _check(response);
     final json = _decodeObject(response);

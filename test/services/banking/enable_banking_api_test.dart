@@ -27,6 +27,17 @@ class _FakeAuth extends EnableBankingAuth {
       'test-token';
 }
 
+class _DelayedAuth extends _FakeAuth {
+  final entered = Completer<void>();
+  final release = Completer<void>();
+  @override
+  Future<String> getValidToken(EnableBankingCredentialsStore store) async {
+    entered.complete();
+    await release.future;
+    return 'old-token';
+  }
+}
+
 EnableBankingApi _apiWith(
   MockClientHandler handler, {
   Duration timeout = const Duration(seconds: 30),
@@ -45,6 +56,37 @@ http.Response _json(Object body, {int statusCode = 200}) => http.Response(
 
 void main() {
   group('EnableBankingApi', () {
+    for (final method in ['GET', 'POST', 'DELETE', 'account']) {
+      test('$method rejects a token invalidated before dispatch', () async {
+        final auth = _DelayedAuth();
+        const store = EnableBankingCredentialsStore();
+        var calls = 0;
+        final api = EnableBankingApi(
+          auth: auth,
+          store: store,
+          client: MockClient((_) async {
+            calls++;
+            return _json({});
+          }),
+        );
+        final Future<Object?> operation = switch (method) {
+          'GET' => api.getApplication(),
+          'POST' => api.createSession('synthetic'),
+          'DELETE' => api.deleteSession('synthetic'),
+          _ => api.getBalances('synthetic'),
+        };
+        final rejected = expectLater(operation, throwsA(anything));
+        await auth.entered.future;
+        final cleared = store.clear();
+        auth.release.complete();
+        await rejected;
+        try {
+          await cleared;
+        } catch (_) {}
+        expect(calls, 0);
+      });
+    }
+
     test('getAspsps sends auth/query headers and parses the list', () async {
       late http.Request captured;
       final api = _apiWith((request) async {

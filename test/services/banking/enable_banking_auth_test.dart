@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -9,7 +11,7 @@ const _testAppId = 'test-app-id';
 
 // Test-only RSA key pair (2048 bit), generated locally with openssl. Not
 // used anywhere outside this test.
-const _testPrivateKeyPem = '''-----BEGIN PRIVATE KEY-----
+const testPrivateKeyPem = '''-----BEGIN PRIVATE KEY-----
 MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCK8tcYKu5wY289
 mQaXvehFJDyUnWxIKaKPNa+Vj1HV+mYtciLBBvLFjXmG8av4FFSctXNHSlkBDhjY
 h0L5QASYI2vgVLn9NFb7F8Y97v2/T64AXf26PbeDrOdWmgKieliX8/36h2iVoEJD
@@ -51,6 +53,38 @@ xQIDAQAB
 /// Spies on how many times credentials are fetched from the store, so tests
 /// can assert whether [EnableBankingAuth] reused its in-memory cache or
 /// signed a fresh token.
+class _ReadBarrierStorage extends FlutterSecureStorage {
+  final String blockedKey;
+  final entered = Completer<void>();
+  final release = Completer<void>();
+  _ReadBarrierStorage(this.blockedKey);
+  @override
+  Future<String?> read({
+    required String key,
+    IOSOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    MacOsOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    final value = await super.read(
+      key: key,
+      iOptions: iOptions,
+      aOptions: aOptions,
+      lOptions: lOptions,
+      webOptions: webOptions,
+      mOptions: mOptions,
+      wOptions: wOptions,
+    );
+    if (key == blockedKey && !entered.isCompleted) {
+      entered.complete();
+      await release.future;
+    }
+    return value;
+  }
+}
+
 class _CountingCredentialsStore extends EnableBankingCredentialsStore {
   int readConfigCalls = 0;
 
@@ -58,6 +92,18 @@ class _CountingCredentialsStore extends EnableBankingCredentialsStore {
   Future<EnableBankingCredentials?> readCredentials() async {
     readConfigCalls++;
     return super.readCredentials();
+  }
+}
+
+class _DelayedCredentialsStore extends EnableBankingCredentialsStore {
+  final entered = Completer<void>();
+  final release = Completer<void>();
+  @override
+  Future<EnableBankingCredentials?> readCredentials() async {
+    final result = await super.readCredentials();
+    entered.complete();
+    await release.future;
+    return result;
   }
 }
 
@@ -69,7 +115,7 @@ void main() {
 
       final token = auth.buildJwt(
         appId: _testAppId,
-        privateKeyPem: _testPrivateKeyPem,
+        privateKeyPem: testPrivateKeyPem,
         ttl: ttl,
       );
 
@@ -111,10 +157,106 @@ void main() {
       final store = _CountingCredentialsStore();
       await store.saveCredentials(
         appId: _testAppId,
-        privateKeyPem: _testPrivateKeyPem,
+        privateKeyPem: testPrivateKeyPem,
         config: const EnableBankingConfig(appId: _testAppId),
       );
       return store;
+    }
+
+    for (final legacy in [true, false]) {
+      test(
+        'storage ${legacy ? 'legacy' : 'versioned'} read finishing after Clear returns no credentials',
+        () async {
+          final storage = _ReadBarrierStorage(
+            legacy ? 'eb_private_key_pem' : 'eb_credentials_v1',
+          );
+          final store = EnableBankingCredentialsStore(storage: storage);
+          if (legacy) {
+            FlutterSecureStorage.setMockInitialValues({
+              'eb_app_id': _testAppId,
+              'eb_private_key_pem': testPrivateKeyPem,
+            });
+          } else {
+            await store.saveCredentials(
+              appId: _testAppId,
+              privateKeyPem: testPrivateKeyPem,
+              config: const EnableBankingConfig(appId: _testAppId),
+            );
+          }
+          final read = store.readCredentials();
+          final rejected = expectLater(read, completion(isNull));
+          await storage.entered.future;
+          await EnableBankingCredentialsStore(storage: storage).clear();
+          storage.release.complete();
+          await rejected;
+        },
+      );
+    }
+
+    test(
+      'same-app key rotation and independent scopes do not reuse cache',
+      () async {
+        final store = await storeWithCredentials();
+        final auth = EnableBankingAuth();
+        await auth.getValidToken(store);
+        await store.saveCredentials(
+          appId: _testAppId,
+          privateKeyPem: 'invalid-new-key',
+          config: const EnableBankingConfig(appId: _testAppId),
+        );
+        await expectLater(auth.getValidToken(store), throwsA(anything));
+        final independent = EnableBankingCredentialsStore(
+          storage: _ReadBarrierStorage('unused'),
+        );
+        await independent.saveCredentials(
+          appId: 'independent',
+          privateKeyPem: testPrivateKeyPem,
+          config: const EnableBankingConfig(appId: 'independent'),
+        );
+        expect(
+          JWT.decode(await auth.getValidToken(independent)).header?['kid'],
+          'independent',
+        );
+      },
+    );
+
+    test('clear through another store invalidates a cached JWT', () async {
+      final store = await storeWithCredentials();
+      final auth = EnableBankingAuth();
+      await auth.getValidToken(store);
+      await const EnableBankingCredentialsStore().clear();
+      await expectLater(auth.getValidToken(store), throwsA(anything));
+      await store.saveCredentials(
+        appId: 'B',
+        privateKeyPem: testPrivateKeyPem,
+        config: const EnableBankingConfig(appId: 'B'),
+      );
+      expect(JWT.decode(await auth.getValidToken(store)).header?['kid'], 'B');
+    });
+
+    for (final clearStore in [true, false]) {
+      test(
+        'inflight token read cannot survive ${clearStore ? 'Clear' : 'clearCache'}',
+        () async {
+          final store = _DelayedCredentialsStore();
+          await store.saveCredentials(
+            appId: _testAppId,
+            privateKeyPem: testPrivateKeyPem,
+            config: const EnableBankingConfig(appId: _testAppId),
+          );
+          final auth = EnableBankingAuth();
+          final result = auth.getValidToken(store);
+          final rejected = expectLater(result, throwsA(anything));
+          await store.entered.future;
+          if (clearStore) {
+            await store.clear();
+          } else {
+            auth.clearCache();
+          }
+          store.release.complete();
+          await rejected;
+        },
+      );
     }
 
     test('throws when no credentials are configured', () {

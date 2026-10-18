@@ -55,14 +55,24 @@ PendingBankAuthorizationStore pendingBankAuthorizationStore(Ref ref) =>
     const SecurePendingBankAuthorizationStore();
 
 @Riverpod(keepAlive: true)
-BankConsentLifecycleService bankConsentLifecycleService(Ref ref) =>
-    BankConsentLifecycleService(
-      consent: ref.watch(bankConsentServiceProvider),
-      institutions: ref.watch(bankInstitutionDirectoryProvider),
-      readContext: ref.watch(bankAuthorizationContextReaderProvider),
-      pendingStore: ref.watch(pendingBankAuthorizationStoreProvider),
-      connections: ref.watch(bankConnectionRepositoryProvider),
-    );
+BankConsentLifecycleService bankConsentLifecycleService(Ref ref) {
+  final store = ref.watch(enableBankingCredentialsStoreProvider);
+  final api = ref.watch(enableBankingApiProvider);
+  return BankConsentLifecycleService(
+    consent: ref.watch(bankConsentServiceProvider),
+    institutions: ref.watch(bankInstitutionDirectoryProvider),
+    readContext: ref.watch(bankAuthorizationContextReaderProvider),
+    pendingStore: ref.watch(pendingBankAuthorizationStoreProvider),
+    connections: ref.watch(bankConnectionRepositoryProvider),
+    credentialRevision: () => store.credentialRevision,
+    cleanupObsoleteConnection: (connection) =>
+        cleanupObsoleteEnableBankingConnection(
+          store: store,
+          api: api,
+          connection: connection,
+        ),
+  );
+}
 
 @Riverpod(keepAlive: true)
 BankDeeplinkService bankDeeplinkService(Ref ref) {
@@ -190,9 +200,15 @@ class EnableBankingSettings extends _$EnableBankingSettings {
 
   Future<void> clear() async {
     final operation = ++_operation;
+    final store = ref.read(enableBankingCredentialsStoreProvider);
+    store.invalidateCredentialCapabilities();
+    ref.read(enableBankingAuthProvider).clearCache();
+    final canceled = ref
+        .read(bankConsentLifecycleServiceProvider)
+        .cancelAuthorization();
     state = const AsyncLoading();
     final result = await AsyncValue.guard(() async {
-      final store = ref.read(enableBankingCredentialsStoreProvider);
+      await canceled;
       await ref
           .read(bankConnectionRepositoryProvider)
           .markAllReauthRequired(providerId: enableBankingId);

@@ -26,10 +26,16 @@ class EnableBankingAuth {
   final Duration _refreshMargin;
   final DateTime Function() _now;
 
+  Object? _cachedScope;
+  int? _cachedRevision;
+  int _cacheRevision = 0;
   String? _cachedToken;
   DateTime? _cachedExpiry;
 
   void clearCache() {
+    ++_cacheRevision;
+    _cachedScope = null;
+    _cachedRevision = null;
     _cachedToken = null;
     _cachedExpiry = null;
   }
@@ -75,15 +81,29 @@ class EnableBankingAuth {
   /// Returns a cached token while it still has more than [_refreshMargin]
   /// left before expiry, otherwise signs and caches a fresh one.
   Future<String> getValidToken(EnableBankingCredentialsStore store) async {
+    final revision = store.credentialRevision;
+    final cacheRevision = _cacheRevision;
+    void check() {
+      if (revision != store.credentialRevision ||
+          cacheRevision != _cacheRevision) {
+        throw const EnableBankingAuthException(
+          'Credentials changed during the operation',
+        );
+      }
+    }
+
     final now = _now();
     final cachedExpiry = _cachedExpiry;
-    if (_cachedToken != null &&
+    if (identical(_cachedScope, store.credentialScope) &&
+        _cachedRevision == revision &&
+        _cachedToken != null &&
         cachedExpiry != null &&
         cachedExpiry.isAfter(now.add(_refreshMargin))) {
       return _cachedToken!;
     }
 
     final credentials = await store.readCredentials();
+    check();
     if (credentials == null) {
       throw const EnableBankingAuthException(
         'Enable Banking credentials are not configured',
@@ -96,6 +116,9 @@ class EnableBankingAuth {
       ttl: _tokenTtl,
     );
 
+    check();
+    _cachedScope = store.credentialScope;
+    _cachedRevision = revision;
     _cachedToken = token;
     _cachedExpiry = now.add(_tokenTtl);
     return token;

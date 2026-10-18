@@ -2,6 +2,7 @@ import 'package:riverpod_annotation/riverpod_annotation.dart';
 
 import '../bank_authorization_context.dart';
 import '../banking_exception.dart';
+import '../bank_authorization_cleanup.dart';
 import 'enable_banking_api.dart';
 import 'enable_banking_auth.dart';
 import 'enable_banking_config.dart';
@@ -34,8 +35,9 @@ EnableBankingCredentialsService enableBankingCredentialsService(Ref ref) =>
 Future<BankAuthorizationContext> readEnableBankingAuthorizationContext(
   EnableBankingCredentialsStore store,
 ) => withEnableBankingErrors(() async {
+  final revision = store.credentialRevision;
   final credentials = await store.readCredentials();
-  if (credentials == null) {
+  if (revision != store.credentialRevision || credentials == null) {
     throw const BankingException(
       providerId: enableBankingId,
       failure: BankingFailure.authentication,
@@ -52,3 +54,31 @@ Future<BankAuthorizationContext> readEnableBankingAuthorizationContext(
     redirectUri: config.redirectUri,
   );
 });
+
+/// Cleanup never adopts credentials owned by another application.
+Future<bool> cleanupObsoleteEnableBankingConnection({
+  required EnableBankingCredentialsStore store,
+  required EnableBankingApi api,
+  required ObsoleteBankConnection connection,
+}) async {
+  final revision = store.credentialRevision;
+  final context = await readEnableBankingAuthorizationContext(store);
+  if (context.providerId != connection.providerId ||
+      context.applicationId != connection.applicationId ||
+      revision != store.credentialRevision ||
+      connection.remoteConnectionId.isEmpty) {
+    return false;
+  }
+  try {
+    await withEnableBankingErrors(
+      () => api.deleteSession(
+        connection.remoteConnectionId,
+        expectedCredentialRevision: revision,
+      ),
+    );
+    return true;
+  } on BankingException catch (error) {
+    if (error.confirmsMissingConnection) return true;
+    rethrow;
+  }
+}

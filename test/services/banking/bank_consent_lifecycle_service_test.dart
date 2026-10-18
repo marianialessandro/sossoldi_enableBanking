@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sossoldi/model/bank_connection.dart';
 import 'package:sossoldi/services/banking/bank_authorization_context.dart';
@@ -9,6 +11,7 @@ import 'package:sossoldi/services/banking/banking_connection.dart';
 import 'package:sossoldi/services/banking/banking_exception.dart';
 import 'package:sossoldi/services/banking/banking_reference.dart';
 import 'package:sossoldi/services/banking/lifecycle/bank_authorization_callback.dart';
+import 'package:sossoldi/services/banking/lifecycle/bank_authorization_coordinator.dart';
 import 'package:sossoldi/services/banking/lifecycle/bank_consent_lifecycle_service.dart';
 import 'package:sossoldi/services/banking/lifecycle/pending_bank_authorization.dart';
 import 'package:sossoldi/services/banking/lifecycle/pending_bank_authorization_store.dart';
@@ -18,6 +21,8 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 class _MemoryPendingStore implements PendingBankAuthorizationStore {
   PendingBankAuthorization? value;
+  Completer<void>? saveEntered;
+  Completer<void>? saveGate;
 
   @override
   Future<void> clear() async => value = null;
@@ -26,12 +31,20 @@ class _MemoryPendingStore implements PendingBankAuthorizationStore {
   Future<PendingBankAuthorization?> read() async => value;
 
   @override
-  Future<void> save(PendingBankAuthorization pending) async => value = pending;
+  Future<void> save(PendingBankAuthorization pending) async {
+    saveEntered?.complete();
+    await saveGate?.future;
+    value = pending;
+  }
 }
 
 class _FakeApi implements BankConsentService, BankInstitutionDirectory {
   List<BankInstitution> aspsps = [];
+  Completer<void>? entered;
+  Completer<void>? startGate;
+  Completer<void>? createGate;
   Object? createFailure;
+  Object? startFailure;
   Object? deleteFailure;
   Object? getSessionFailure;
   DateTime validUntil = DateTime.utc(2026, 10, 1);
@@ -52,6 +65,9 @@ class _FakeApi implements BankConsentService, BankInstitutionDirectory {
     BankingAuthorizationRequest request,
   ) async {
     startCalls++;
+    entered?.complete();
+    await startGate?.future;
+    if (startFailure case final failure?) throw failure;
     requestedValidUntil = request.validUntil;
     return BankingAuthorization(
       providerId: 'alternative',
@@ -74,6 +90,8 @@ class _FakeApi implements BankConsentService, BankInstitutionDirectory {
   @override
   Future<BankingConnectionResult> createConnection(String code) async {
     createCalls++;
+    entered?.complete();
+    await createGate?.future;
     if (createFailure case final failure?) throw failure;
     return BankingConnectionResult(
       connection: connection('session-new'),
@@ -122,6 +140,7 @@ void main() {
   );
   late _MemoryPendingStore pending;
   late _FakeApi api;
+  var credentialsRevision = 0;
   final now = DateTime.utc(2026, 9, 1, 12);
 
   setUpAll(() {
@@ -146,6 +165,7 @@ void main() {
     repository = BankConnectionRepository.withDatabase(db);
     pending = _MemoryPendingStore();
     api = _FakeApi();
+    credentialsRevision = 0;
     api.aspsps = [
       bank(
         name: 'Test Bank',
@@ -158,15 +178,261 @@ void main() {
 
   tearDown(() => db.close());
 
-  BankConsentLifecycleService service() => BankConsentLifecycleService(
-    consent: api,
-    institutions: api,
-    readContext: () async => context,
-    pendingStore: pending,
-    connections: repository,
-    clock: () => now,
-    callbackSupported: () => true,
+  BankConsentLifecycleService service({bool trackCredentials = false}) =>
+      BankConsentLifecycleService(
+        consent: api,
+        institutions: api,
+        readContext: () async => context,
+        pendingStore: pending,
+        connections: repository,
+        clock: () => now,
+        callbackSupported: () => true,
+        credentialRevision: trackCredentials ? () => credentialsRevision : null,
+      );
+
+  test('A09 two lifecycle instances share one start and state', () async {
+    api.entered = Completer<void>();
+    api.startGate = Completer<void>();
+    final firstService = service();
+    final secondService = service();
+    final first = firstService.startAuthorization(bank());
+    await api.entered!.future;
+    final second = secondService.startAuthorization(bank());
+    api.startGate!.complete();
+    final results = await Future.wait([first, second]);
+    expect(api.startCalls, 1);
+    expect(results[0].url, results[1].url);
+    expect(results[0].consentValidUntil, results[1].consentValidUntil);
+    await secondService.startAuthorization(bank());
+    expect(api.startCalls, 1);
+  });
+
+  test('A10 Cancel detaches A; its late result cannot overwrite B', () async {
+    api.entered = Completer<void>();
+    api.startGate = Completer<void>();
+    final first = service().startAuthorization(bank());
+    final rejected = expectLater(first, throwsA(isA<BankingException>()));
+    await api.entered!.future;
+    await service().cancelAuthorization();
+    final oldGate = api.startGate!;
+    api.startGate = null;
+    api.entered = null;
+    await service().startAuthorization(bank());
+    final savedB = pending.value!.toJson();
+    oldGate.complete();
+    await rejected;
+    expect(pending.value!.toJson(), savedB);
+    expect(api.startCalls, 2);
+  });
+
+  test('Cancel during pending save waits and removes only A', () async {
+    pending.saveEntered = Completer<void>();
+    pending.saveGate = Completer<void>();
+    final first = service().startAuthorization(bank());
+    final rejected = expectLater(first, throwsA(isA<BankingException>()));
+    await pending.saveEntered!.future;
+    final canceled = service().cancelAuthorization();
+    pending.saveGate!.complete();
+    await Future.wait([rejected, canceled]);
+    expect(pending.value, isNull);
+  });
+
+  for (final replace in [false, true]) {
+    test(
+      'A11/A12 obsolete callback ${replace ? 'changed app' : 'Cancel'} cannot stage',
+      () async {
+        await service().startAuthorization(bank());
+        api.entered = Completer<void>();
+        api.createGate = Completer<void>();
+        final callback = service().completeCallback(
+          BankAuthorizationCallback(
+            state: pending.value!.state,
+            code: 'synthetic',
+          ),
+        );
+        final rejected = expectLater(
+          callback,
+          throwsA(isA<ObsoleteBankAuthorizationException>()),
+        );
+        await api.entered!.future;
+        if (replace) {
+          context = const BankAuthorizationContext(
+            providerId: 'alternative',
+            applicationId: 'B',
+            redirectUri: 'sossoldi://eb-callback',
+          );
+        } else {
+          await service().cancelAuthorization();
+        }
+        api.createGate!.complete();
+        await rejected;
+        expect(await repository.selectAwaitingImport(), isEmpty);
+        expect(pending.value, isNull);
+        if (replace) {
+          expect(api.deleteCalls, 0);
+          expect(
+            pending.coordinator.unresolvedConnections.single.applicationId,
+            'app-id',
+          );
+        } else {
+          expect(api.deleteCalls, 1);
+        }
+      },
+    );
+  }
+
+  test('duplicate callbacks across instances exchange code once', () async {
+    await service().startAuthorization(bank());
+    final callback = BankAuthorizationCallback(
+      state: pending.value!.state,
+      code: 'synthetic',
+    );
+    final results = await Future.wait([
+      service().completeCallback(callback),
+      service().completeCallback(callback),
+    ]);
+    expect(api.createCalls, 1);
+    expect(results[0].connection.id, results[1].connection.id);
+  });
+
+  test('start failure releases the shared slot for retry', () async {
+    api.startFailure = const BankingException(
+      providerId: 'alternative',
+      failure: BankingFailure.unavailable,
+    );
+    await expectLater(
+      service().startAuthorization(bank()),
+      throwsA(isA<BankingException>()),
+    );
+    api.startFailure = null;
+    await service().startAuthorization(bank());
+    expect(api.startCalls, 2);
+  });
+
+  test(
+    'incompatible concurrent bank or app cannot join the shared start',
+    () async {
+      api.entered = Completer<void>();
+      api.startGate = Completer<void>();
+      final first = service().startAuthorization(bank());
+      await api.entered!.future;
+      await expectLater(
+        service().startAuthorization(bank(name: 'Other')),
+        throwsA(isA<BankingException>()),
+      );
+      context = const BankAuthorizationContext(
+        providerId: 'alternative',
+        applicationId: 'B',
+        redirectUri: 'sossoldi://eb-callback',
+      );
+      await expectLater(
+        service().startAuthorization(bank()),
+        throwsA(isA<BankingException>()),
+      );
+      context = const BankAuthorizationContext(
+        providerId: 'alternative',
+        applicationId: 'app-id',
+        redirectUri: 'sossoldi://eb-callback',
+      );
+      api.startGate!.complete();
+      await first;
+      expect(api.startCalls, 1);
+    },
   );
+
+  test('callback A finishing after new pending B leaves B unchanged', () async {
+    await service().startAuthorization(bank());
+    api.entered = Completer<void>();
+    api.createGate = Completer<void>();
+    final result = service().completeCallback(
+      BankAuthorizationCallback(state: pending.value!.state, code: 'synthetic'),
+    );
+    final rejected = expectLater(
+      result,
+      throwsA(isA<ObsoleteBankAuthorizationException>()),
+    );
+    await api.entered!.future;
+    await service().cancelAuthorization();
+    api.entered = null;
+    await service().startAuthorization(bank());
+    final savedB = pending.value!.toJson();
+    api.createGate!.complete();
+    await rejected;
+    expect(pending.value!.toJson(), savedB);
+    expect(await repository.selectAwaitingImport(), isEmpty);
+  });
+
+  test(
+    'same-app credential rotation invalidates a retained lifecycle callback',
+    () async {
+      final lifecycle = service(trackCredentials: true);
+      await lifecycle.startAuthorization(bank());
+      api.entered = Completer<void>();
+      api.createGate = Completer<void>();
+      final result = lifecycle.completeCallback(
+        BankAuthorizationCallback(
+          state: pending.value!.state,
+          code: 'synthetic',
+        ),
+      );
+      final rejected = expectLater(
+        result,
+        throwsA(isA<ObsoleteBankAuthorizationException>()),
+      );
+      await api.entered!.future;
+      credentialsRevision++;
+      api.createGate!.complete();
+      await rejected;
+      expect(await repository.selectAwaitingImport(), isEmpty);
+      expect(api.deleteCalls, 0);
+      expect(pending.coordinator.unresolvedConnections, hasLength(1));
+    },
+  );
+
+  test(
+    'Cancel while staged pending save is suspended removes committed staging',
+    () async {
+      await service().startAuthorization(bank());
+      pending.saveEntered = Completer<void>();
+      pending.saveGate = Completer<void>();
+      final result = service().completeCallback(
+        BankAuthorizationCallback(
+          state: pending.value!.state,
+          code: 'synthetic',
+        ),
+      );
+      final rejected = expectLater(
+        result,
+        throwsA(isA<ObsoleteBankAuthorizationException>()),
+      );
+      await pending.saveEntered!.future;
+      final canceled = service().cancelAuthorization();
+      pending.saveGate!.complete();
+      await Future.wait([rejected, canceled]);
+      expect(await repository.selectAll(), isEmpty);
+      expect(pending.value, isNull);
+    },
+  );
+
+  test('SQLite staging rolls back when invalidated after insert', () async {
+    var checks = 0;
+    await expectLater(
+      repository.stageConnection(
+        providerId: 'alternative',
+        authorizationId: 'a',
+        applicationId: 'app-id',
+        institutionName: 'Test Bank',
+        institutionCountry: 'IT',
+        remoteConnectionId: 'remote',
+        validUntil: now.add(const Duration(days: 1)),
+        psuType: 'personal',
+        isAuthorizationCurrent: () => ++checks < 4,
+      ),
+      throwsA(anything),
+    );
+    expect(checks, 4);
+    expect(await repository.selectAll(), isEmpty);
+  });
 
   test('reconnect reloads metadata and clamps requested validity', () async {
     final connection = await repository.insert(
