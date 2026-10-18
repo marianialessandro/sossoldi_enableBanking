@@ -11,6 +11,7 @@ import '../services/banking/banking_balance.dart';
 import '../services/banking/banking_exception.dart';
 import '../services/banking/banking_reference.dart';
 import '../services/banking/lifecycle/bank_authorization_result.dart';
+import '../services/banking/lifecycle/bank_session_recovery_store.dart';
 import '../services/banking/lifecycle/banking_platform_support.dart';
 import '../services/banking/sync/bank_sync_lifecycle.dart';
 import '../services/banking/sync/bank_sync_result.dart';
@@ -35,6 +36,9 @@ class ConnectBankFlowException implements Exception {
 }
 
 String bankingErrorMessage(Object error) {
+  if (error is BankSessionOutcomeUnknownException) {
+    return 'The bank connection outcome is unknown. Check the connection with your bank before starting again.';
+  }
   if (error is ConnectBankFlowException) return error.message;
   if (error is SocketException || error is TimeoutException) {
     return 'The bank could not be reached. Check your connection and try again.';
@@ -176,20 +180,36 @@ Future<BankSyncSummary> bankConnectionSyncStatus(Ref ref, int connectionId) =>
 
 @Riverpod(keepAlive: true)
 class BankRecoveryIssue extends _$BankRecoveryIssue {
+  String? _recoveryIssue;
+  String? _syncIssue;
   @override
   String? build() => null;
-  void report(Object error) => state = bankingErrorMessage(error);
-  void reportMessage(String message) => state = message;
-  void clear() => state = null;
+  void report(Object error) => reportMessage(bankingErrorMessage(error));
+  void reportMessage(String message) {
+    _syncIssue = message;
+    state = _recoveryIssue ?? _syncIssue;
+  }
+
+  void reportRecovery(String? message) {
+    _recoveryIssue = message;
+    state = _recoveryIssue ?? _syncIssue;
+  }
+
+  void clear() {
+    _syncIssue = null;
+    state = _recoveryIssue;
+  }
 }
 
 class BankAccountImportSelection {
+  final BankConnection expectedStaging;
   final BankingAccount account;
   final String name;
   final String symbol;
   final int color;
 
   const BankAccountImportSelection({
+    required this.expectedStaging,
     required this.account,
     required this.name,
     required this.symbol,
@@ -272,6 +292,7 @@ Future<num?> ebAccountBalance(Ref ref, String accountUid) async {
 
 @Riverpod(keepAlive: true)
 class ConnectBankFlow extends _$ConnectBankFlow {
+  int _operation = 0;
   @override
   ConnectBankFlowState build() => const ConnectBankFlowState();
 
@@ -305,6 +326,7 @@ class ConnectBankFlow extends _$ConnectBankFlow {
     BankInstitution institution, {
     BankConnection? reconnecting,
   }) async {
+    final operation = ++_operation;
     state = ConnectBankFlowState(aspsps: state.aspsps, authorizing: true);
     try {
       final lifecycle = ref.read(bankConsentLifecycleServiceProvider);
@@ -314,7 +336,9 @@ class ConnectBankFlow extends _$ConnectBankFlow {
       );
       return await lifecycle.launchAuthorization(attempt.url);
     } finally {
-      state = ConnectBankFlowState(aspsps: state.aspsps);
+      if (ref.mounted && operation == _operation) {
+        state = ConnectBankFlowState(aspsps: state.aspsps);
+      }
     }
   }
 
@@ -348,6 +372,8 @@ class ConnectBankFlow extends _$ConnectBankFlow {
   }
 
   Future<void> resumeImport({int? connectionId}) async {
+    final operation = ++_operation;
+    await recoverBankSessions(ref);
     final resumable = await ref
         .read(bankConsentLifecycleServiceProvider)
         .resumeAwaitingImports();
@@ -362,7 +388,7 @@ class ConnectBankFlow extends _$ConnectBankFlow {
         await ref.read(bankAccountDataSourceProvider).getAccount(reference),
       );
     }
-    if (!ref.mounted) return;
+    if (!ref.mounted || operation != _operation) return;
     state = ConnectBankFlowState(
       connection: item.connection,
       importable: accounts,
@@ -373,10 +399,23 @@ class ConnectBankFlow extends _$ConnectBankFlow {
   Future<BankSyncSummary> importAccounts(
     List<BankAccountImportSelection> selections,
   ) async {
-    final connectionId = state.connectionId;
+    final operation = _operation;
+    final expected = selections.isEmpty
+        ? null
+        : selections.first.expectedStaging;
+    final connectionId = expected?.id;
     if (connectionId == null || selections.isEmpty) {
       throw const ConnectBankFlowException(
         'Select accounts from an active connection.',
+      );
+    }
+    if (state.connection == null ||
+        !state.connection!.sameLifecycle(expected!) ||
+        selections.any(
+          (selection) => !selection.expectedStaging.sameLifecycle(expected),
+        )) {
+      throw const ConnectBankFlowException(
+        'The bank connection changed. Reload the accounts before importing.',
       );
     }
     if (selections.any(
@@ -389,6 +428,14 @@ class ConnectBankFlow extends _$ConnectBankFlow {
       );
     }
     final previous = await ref.read(accountsProvider.future);
+    if (!ref.mounted ||
+        operation != _operation ||
+        state.connection == null ||
+        !state.connection!.sameLifecycle(expected)) {
+      throw const ConnectBankFlowException(
+        'The bank connection changed. Reload the accounts before importing.',
+      );
+    }
     await ref
         .read(bankConsentLifecycleServiceProvider)
         .activateConnection(connectionId, [
@@ -406,7 +453,15 @@ class ConnectBankFlow extends _$ConnectBankFlow {
                 order: previous.length + index,
               ),
             ),
-        ]);
+        ], expectedStaging: expected);
+    if (!ref.mounted ||
+        operation != _operation ||
+        state.connection == null ||
+        !state.connection!.sameLifecycle(expected)) {
+      throw const ConnectBankFlowException(
+        'The bank connection changed. Reload the accounts before importing.',
+      );
+    }
     state = const ConnectBankFlowState();
     _refreshBankData(ref);
     return syncConnectionId(connectionId, initial: true);
@@ -475,8 +530,10 @@ class ConnectBankFlow extends _$ConnectBankFlow {
     _refreshBankData(ref);
   }
 
-  Future<void> cancelAuthorization() =>
-      ref.read(bankConsentLifecycleServiceProvider).cancelAuthorization();
+  Future<void> cancelAuthorization() {
+    ++_operation;
+    return ref.read(bankConsentLifecycleServiceProvider).cancelAuthorization();
+  }
 }
 
 @Riverpod(keepAlive: true)

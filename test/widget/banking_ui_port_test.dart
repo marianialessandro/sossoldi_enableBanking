@@ -98,6 +98,10 @@ class _Flow extends ConnectBankFlow {
   @override
   ConnectBankFlowState build() =>
       ConnectBankFlowState(connection: connection, importable: [remoteAccount]);
+  void replace(BankConnection next) => state = ConnectBankFlowState(
+    connection: next,
+    importable: [remoteAccount],
+  );
   @override
   Future<BankSyncSummary> importAccounts(
     List<BankAccountImportSelection> selections,
@@ -152,8 +156,9 @@ class _Lifecycle implements BankConsentLifecycleService {
   @override
   Future<BankConnection> activateConnection(
     int connectionId,
-    List<({BankingAccount remote, BankAccount? newAccount})> selections,
-  ) async {
+    List<({BankingAccount remote, BankAccount? newAccount})> selections, {
+    BankConnection? expectedStaging,
+  }) async {
     activatedId = connectionId;
     activated = selections;
     return connection.copy(status: BankConnectionStatus.active);
@@ -190,6 +195,44 @@ class _Sync implements BankSyncService {
 }
 
 void main() {
+  testWidgets('same UID in a replacement consent resets the page draft', (
+    tester,
+  ) async {
+    final flow = _Flow();
+    final container = ProviderContainer(
+      overrides: [
+        connectBankFlowProvider.overrideWith(() => flow),
+        ebAccountBalanceProvider('account').overrideWith((ref) async => 0),
+      ],
+    );
+    addTearDown(container.dispose);
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(
+          theme: AppTheme.lightTheme,
+          home: const ImportAccountsPage(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final field = find.byType(TextField).first;
+    await tester.enterText(field, 'Old draft');
+    flow.replace(
+      connection.copy(
+        pendingRemoteConnectionId: 'replacement',
+        pendingAuthorizationId: 'replacement-auth',
+        applicationId: 'replacement-app',
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Old draft'), findsNothing);
+    expect(
+      tester.widget<TextField>(field).controller!.text,
+      remoteAccount.name,
+    );
+    expect(tester.takeException(), isNull);
+  });
   testWidgets(
     'bank card asks for required interactive context and cancel does not sync',
     (tester) async {
@@ -282,6 +325,7 @@ void main() {
       );
       final summary = await flow.importAccounts([
         BankAccountImportSelection(
+          expectedStaging: connection,
           account: remoteAccount,
           name: 'My account',
           symbol: 'payments',

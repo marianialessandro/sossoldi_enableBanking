@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../constants/constants.dart';
 import '../../constants/style.dart';
 import '../../providers/banking_ui_provider.dart';
+import '../../model/bank_connection.dart';
 import '../../services/banking/banking_account.dart';
 import '../../ui/device.dart';
 import '../../ui/snack_bars/snack_bar.dart';
@@ -33,12 +34,15 @@ class ImportAccountsPage extends ConsumerStatefulWidget {
 class _ImportAccountsPageState extends ConsumerState<ImportAccountsPage> {
   final List<_ImportDraft> drafts = [];
   bool importing = false;
+  BankConnection? expectedStaging;
 
   @override
   void initState() {
     super.initState();
 
-    _reconcile(ref.read(connectBankFlowProvider).importable, reset: true);
+    final flow = ref.read(connectBankFlowProvider);
+    expectedStaging = flow.connection;
+    _reconcile(flow.importable, reset: true);
   }
 
   void _reconcile(List<BankingAccount> accounts, {required bool reset}) {
@@ -83,7 +87,8 @@ class _ImportAccountsPageState extends ConsumerState<ImportAccountsPage> {
 
   Future<void> _import() async {
     final selected = drafts.where((draft) => draft.selected).toList();
-    if (selected.isEmpty) return;
+    final expected = expectedStaging;
+    if (selected.isEmpty || expected == null) return;
 
     setState(() => importing = true);
     try {
@@ -92,6 +97,7 @@ class _ImportAccountsPageState extends ConsumerState<ImportAccountsPage> {
           .importAccounts([
             for (final draft in selected)
               BankAccountImportSelection(
+                expectedStaging: expected,
                 account: draft.account,
                 name: draft.nameController.text.trim().isEmpty
                     ? "Account"
@@ -124,11 +130,13 @@ class _ImportAccountsPageState extends ConsumerState<ImportAccountsPage> {
   Widget build(BuildContext context) {
     ref.listen(connectBankFlowProvider, (previous, next) {
       final reset =
-          previous?.connection?.id != next.connection?.id ||
-          previous?.connection?.remoteConnectionId !=
-              next.connection?.remoteConnectionId ||
-          previous?.connection?.providerId != next.connection?.providerId;
-      setState(() => _reconcile(next.importable, reset: reset));
+          previous?.connection == null ||
+          next.connection == null ||
+          !previous!.connection!.sameLifecycle(next.connection!);
+      setState(() {
+        expectedStaging = next.connection;
+        _reconcile(next.importable, reset: reset);
+      });
     });
     final connection = ref.watch(connectBankFlowProvider).connection;
     final selectedCount = drafts.where((draft) => draft.selected).length;

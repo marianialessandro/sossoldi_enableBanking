@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sossoldi/model/bank_account.dart';
 import 'package:sossoldi/model/bank_account_link.dart';
@@ -30,6 +32,256 @@ void main() {
   });
 
   tearDown(() => db.close());
+
+  test(
+    'every lifecycle snapshot field is required and stale mutations are no-ops',
+    () async {
+      final staged = await _stage(repository, authorizationId: 'snapshot');
+      final snapshots = [
+        staged.copy(id: staged.id! + 1),
+        staged.copy(providerId: 'other'),
+        staged.copy(applicationId: 'other'),
+        staged.copy(institutionName: 'other'),
+        staged.copy(institutionCountry: 'GB'),
+        staged.copy(remoteConnectionId: 'old'),
+        staged.copy(validUntil: now),
+        staged.copy(pendingRemoteConnectionId: 'other'),
+        staged.copy(pendingAuthorizationId: 'other'),
+        staged.copy(
+          pendingValidUntil: staged.pendingValidUntil!.add(
+            const Duration(seconds: 1),
+          ),
+        ),
+        staged.copy(status: BankConnectionStatus.revocationPending),
+        staged.copy(psuType: 'business'),
+      ];
+      final before = await db.query(bankConnectionTable);
+      for (final snapshot in snapshots) {
+        await expectLater(
+          repository.activateStagedConnection(
+            staged.id!,
+            [
+              BankAccountLink(
+                uid: 'uid',
+                identificationHashes: const {'hash'},
+                newAccount: _draft('Unsafe'),
+              ),
+            ],
+            expectedStaging: snapshot,
+            clock: () => now,
+          ),
+          throwsA(isA<BankReconciliationException>()),
+        );
+        expect(
+          await repository.markStatusIfCurrent(
+            snapshot,
+            BankConnectionStatus.revoked,
+            clock: () => now,
+          ),
+          isNull,
+        );
+        expect(
+          await repository.failStagedConnectionIfCurrent(
+            snapshot,
+            BankConnectionStatus.expired,
+            clock: () => now,
+          ),
+          isNull,
+        );
+        expect(
+          await repository.discardStagedConnectionIfCurrent(
+            snapshot,
+            clock: () => now,
+          ),
+          isNull,
+        );
+        expect(
+          await repository.finalizeRemoteRevocationIfCurrent(
+            snapshot,
+            clock: () => now,
+          ),
+          isNull,
+        );
+        expect(
+          await repository.disconnectLocallyIfCurrent(
+            snapshot,
+            clock: () => now,
+          ),
+          isNull,
+        );
+      }
+      await expectLater(
+        repository.activateStagedConnection(staged.id!, []),
+        throwsA(isA<BankReconciliationException>()),
+      );
+      expect(await db.query(bankConnectionTable), before);
+      expect(await db.query(bankAccountTable), isEmpty);
+      expect(await db.query(bankAccountIdentityTable), isEmpty);
+    },
+  );
+
+  for (final status in [
+    BankConnectionStatus.revocationPending,
+    BankConnectionStatus.disconnected,
+    BankConnectionStatus.revoked,
+    BankConnectionStatus.authorizing,
+  ]) {
+    test(
+      'activation rejects actual ${status.name} even with valid pending',
+      () async {
+        final staged = await _stage(repository, authorizationId: 'state');
+        final changed = (await repository.markStatusIfCurrent(
+          staged,
+          status,
+          clock: () => now,
+        ))!;
+        await expectLater(
+          repository.activateStagedConnection(
+            changed.id!,
+            [
+              BankAccountLink(
+                uid: 'uid',
+                identificationHashes: const {'hash'},
+                newAccount: _draft('Unsafe'),
+              ),
+            ],
+            expectedStaging: changed,
+            clock: () => now,
+          ),
+          throwsA(isA<BankReconciliationException>()),
+        );
+        expect(await db.query(bankAccountTable), isEmpty);
+      },
+    );
+  }
+
+  test(
+    'existing v9 file reopens and linking failure rolls back all three tables',
+    () async {
+      await db.close();
+      final temp = Directory.systemTemp.createTempSync('bank-snapshot-v9-');
+      addTearDown(() => temp.delete(recursive: true));
+      final path = '${temp.path}/v9.db';
+      final manager = MigrationManager();
+      db = await databaseFactory.openDatabase(
+        path,
+        options: OpenDatabaseOptions(
+          version: 9,
+          onCreate: (db, version) => manager.migrate(db, 0, version),
+        ),
+      );
+      await db.close();
+      db = await databaseFactory.openDatabase(
+        path,
+        options: OpenDatabaseOptions(version: 9),
+      );
+      repository = BankConnectionRepository.withDatabase(db);
+      final staged = await _stage(repository, authorizationId: 'file');
+      final before = await db.query(bankConnectionTable);
+      await db.execute(
+        'CREATE TRIGGER reject_second_identity BEFORE INSERT ON bankAccountIdentity WHEN NEW.identificationHash = \'reject\' BEGIN SELECT RAISE(ABORT, \'synthetic\'); END',
+      );
+      await expectLater(
+        repository.activateStagedConnection(
+          staged.id!,
+          [
+            BankAccountLink(
+              uid: 'first',
+              identificationHashes: const {'first'},
+              newAccount: _draft('First'),
+            ),
+            BankAccountLink(
+              uid: 'second',
+              identificationHashes: const {'reject'},
+              newAccount: _draft('Second'),
+            ),
+          ],
+          expectedStaging: staged,
+          clock: () => now,
+        ),
+        throwsA(anything),
+      );
+      expect(await db.query(bankAccountTable), isEmpty);
+      expect(await db.query(bankAccountIdentityTable), isEmpty);
+      expect(await db.query(bankConnectionTable), before);
+      await db.execute('DROP TRIGGER reject_second_identity');
+      final activated = await repository.activateStagedConnection(
+        staged.id!,
+        [
+          BankAccountLink(
+            uid: 'first',
+            identificationHashes: const {'first'},
+            newAccount: _draft('First'),
+          ),
+        ],
+        expectedStaging: staged,
+        clock: () => now,
+      );
+      expect(activated.status, BankConnectionStatus.active);
+    },
+  );
+
+  test(
+    'revision invalidation after linking rolls back created accounts',
+    () async {
+      final staged = await _stage(repository, authorizationId: 'guard');
+      var checks = 0;
+      await expectLater(
+        repository.activateStagedConnection(
+          staged.id!,
+          [
+            BankAccountLink(
+              uid: 'uid',
+              identificationHashes: const {'hash'},
+              newAccount: _draft('Rolled back'),
+            ),
+          ],
+          expectedStaging: staged,
+          clock: () => now,
+          isAuthorizationCurrent: () => ++checks < 2,
+        ),
+        throwsA(anything),
+      );
+      expect(checks, 2);
+      expect(await db.query(bankAccountTable), isEmpty);
+      expect(await db.query(bankAccountIdentityTable), isEmpty);
+      expect(
+        (await repository.selectById(staged.id!)).sameLifecycle(staged),
+        isTrue,
+      );
+    },
+  );
+
+  for (final offset in [-1, 0, 1]) {
+    test('activation expiry boundary $offset is atomic', () async {
+      final staged = await _stage(repository, authorizationId: 'boundary');
+      final before = await db.query(bankConnectionTable);
+      final operation = repository.activateStagedConnection(
+        staged.id!,
+        [
+          BankAccountLink(
+            uid: 'uid',
+            identificationHashes: const {'hash'},
+            newAccount: _draft('Boundary'),
+          ),
+        ],
+        expectedStaging: staged,
+        clock: () =>
+            staged.pendingValidUntil!.add(Duration(microseconds: offset)),
+      );
+      if (offset < 0) {
+        expect((await operation).status, BankConnectionStatus.active);
+      } else {
+        await expectLater(
+          operation,
+          throwsA(isA<BankReconciliationException>()),
+        );
+        expect(await db.query(bankConnectionTable), before);
+        expect(await db.query(bankAccountTable), isEmpty);
+        expect(await db.query(bankAccountIdentityTable), isEmpty);
+      }
+    });
+  }
 
   test(
     'same authorization ID remains distinct across providers and credential rotation',
@@ -86,20 +338,25 @@ void main() {
 
   test('reconnect changes UID without duplicating account history', () async {
     final staged = await _stage(repository, authorizationId: 'auth-1');
-    final first = await repository.activateStagedConnection(staged.id!, [
-      BankAccountLink(
-        uid: 'uid-old',
-        identificationHashes: const {'hash-main', 'hash-alias'},
-        iban: 'IT00TEST',
-        newAccount: _draft('Checking', startingValue: 42),
-      ),
-      BankAccountLink(
-        uid: 'uid-removed',
-        identificationHashes: const {'hash-removed'},
-        iban: 'IT00REMOVED',
-        newAccount: _draft('Removed'),
-      ),
-    ]);
+    final first = await repository.activateStagedConnection(
+      staged.id!,
+      [
+        BankAccountLink(
+          uid: 'uid-old',
+          identificationHashes: const {'hash-main', 'hash-alias'},
+          iban: 'IT00TEST',
+          newAccount: _draft('Checking', startingValue: 42),
+        ),
+        BankAccountLink(
+          uid: 'uid-removed',
+          identificationHashes: const {'hash-removed'},
+          iban: 'IT00REMOVED',
+          newAccount: _draft('Removed'),
+        ),
+      ],
+      expectedStaging: staged,
+      clock: () => now,
+    );
     final originalRows = await db.query(
       bankAccountTable,
       where: '${BankAccountFields.ebConnectionId} = ?',
@@ -132,18 +389,23 @@ void main() {
       first.id,
     );
 
-    final reconnected = await repository.activateStagedConnection(first.id!, [
-      const BankAccountLink(
-        uid: 'uid-new',
-        identificationHashes: {'hash-alias', 'hash-new'},
-        iban: 'IT00UPDATED',
-      ),
-      BankAccountLink(
-        uid: 'uid-added',
-        identificationHashes: const {'hash-added'},
-        newAccount: _draft('Added'),
-      ),
-    ]);
+    final reconnected = await repository.activateStagedConnection(
+      first.id!,
+      [
+        const BankAccountLink(
+          uid: 'uid-new',
+          identificationHashes: {'hash-alias', 'hash-new'},
+          iban: 'IT00UPDATED',
+        ),
+        BankAccountLink(
+          uid: 'uid-added',
+          identificationHashes: const {'hash-added'},
+          newAccount: _draft('Added'),
+        ),
+      ],
+      expectedStaging: beforeCommit,
+      clock: () => now,
+    );
 
     expect(reconnected.remoteConnectionId, 'session-new');
     expect(reconnected.pendingRemoteConnectionId, isNull);
@@ -169,18 +431,23 @@ void main() {
 
   test('identity collision rolls back every reconnect change', () async {
     final staged = await _stage(repository, authorizationId: 'auth-1');
-    final active = await repository.activateStagedConnection(staged.id!, [
-      BankAccountLink(
-        uid: 'uid-a',
-        identificationHashes: const {'hash-a'},
-        newAccount: _draft('A'),
-      ),
-      BankAccountLink(
-        uid: 'uid-b',
-        identificationHashes: const {'hash-b'},
-        newAccount: _draft('B'),
-      ),
-    ]);
+    final active = await repository.activateStagedConnection(
+      staged.id!,
+      [
+        BankAccountLink(
+          uid: 'uid-a',
+          identificationHashes: const {'hash-a'},
+          newAccount: _draft('A'),
+        ),
+        BankAccountLink(
+          uid: 'uid-b',
+          identificationHashes: const {'hash-b'},
+          newAccount: _draft('B'),
+        ),
+      ],
+      expectedStaging: staged,
+      clock: () => now,
+    );
     await repository.stageConnection(
       providerId: 'enable_banking',
       authorizationId: 'auth-2',
@@ -194,12 +461,17 @@ void main() {
     );
 
     await expectLater(
-      () => repository.activateStagedConnection(active.id!, const [
-        BankAccountLink(
-          uid: 'uid-collision',
-          identificationHashes: {'hash-a', 'hash-b'},
-        ),
-      ]),
+      () async => repository.activateStagedConnection(
+        active.id!,
+        const [
+          BankAccountLink(
+            uid: 'uid-collision',
+            identificationHashes: {'hash-a', 'hash-b'},
+          ),
+        ],
+        expectedStaging: await repository.selectById(active.id!),
+        clock: () => now,
+      ),
       throwsA(
         isA<BankReconciliationException>().having(
           (error) => error.failure,
@@ -227,13 +499,18 @@ void main() {
     () async {
       final staged = await _stage(repository, authorizationId: 'auth-1');
       await expectLater(
-        () => repository.activateStagedConnection(staged.id!, [
-          BankAccountLink(
-            uid: 'uid',
-            identificationHashes: const {},
-            newAccount: _draft('Unsafe'),
-          ),
-        ]),
+        () => repository.activateStagedConnection(
+          staged.id!,
+          [
+            BankAccountLink(
+              uid: 'uid',
+              identificationHashes: const {},
+              newAccount: _draft('Unsafe'),
+            ),
+          ],
+          expectedStaging: staged,
+          clock: () => now,
+        ),
         throwsA(isA<BankReconciliationException>()),
       );
       expect(await db.query(bankAccountTable), isEmpty);
@@ -248,7 +525,12 @@ void main() {
     final staged = await _stage(repository, authorizationId: 'auth-1');
 
     await expectLater(
-      () => repository.activateStagedConnection(staged.id!, const []),
+      () => repository.activateStagedConnection(
+        staged.id!,
+        const [],
+        expectedStaging: staged,
+        clock: () => now,
+      ),
       throwsA(isA<BankReconciliationException>()),
     );
     expect(

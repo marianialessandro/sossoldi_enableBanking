@@ -31,14 +31,31 @@ void main() {
         database: database,
       ).getTransactions(1, 10);
       expect(accountHistory.single['bankImported'], 1);
-      await BankConnectionRepository.withDatabase(
-        harness.db,
-      ).disconnectLocally(1);
+      final connections = BankConnectionRepository.withDatabase(harness.db);
+      final expected = await connections.selectById(1);
+      expect(
+        await connections.disconnectLocallyIfCurrent(
+          expected.copy(applicationId: 'stale'),
+        ),
+        isNull,
+      );
+      expect(
+        (await repository.selectById(transaction.id!)).isBankImported,
+        isTrue,
+      );
+      expect(await connections.disconnectLocallyIfCurrent(expected), isNotNull);
       expect(
         (await repository.selectById(transaction.id!)).isBankImported,
         isFalse,
       );
       expect((await repository.selectAll()).single.amount, transaction.amount);
+      await repository.updateItem(
+        transaction.copy(note: 'Editable manual data'),
+      );
+      expect(
+        (await repository.selectById(transaction.id!)).note,
+        'Editable manual data',
+      );
     },
   );
 }

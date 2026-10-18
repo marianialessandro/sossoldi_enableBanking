@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:riverpod_annotation/riverpod_annotation.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' show Provider;
 
 import '../services/banking/bank_account_data_source.dart' as domain;
 import '../services/banking/bank_authorization_context.dart';
@@ -17,7 +18,9 @@ import '../services/banking/lifecycle/bank_consent_lifecycle_service.dart';
 import '../services/banking/lifecycle/bank_deeplink_service.dart';
 import '../services/banking/lifecycle/banking_platform_support.dart';
 import '../services/banking/lifecycle/pending_bank_authorization_store.dart';
+import '../services/banking/lifecycle/bank_session_recovery_store.dart';
 import '../services/database/repositories/bank_connection_repository.dart';
+import 'banking_ui_provider.dart' show bankRecoveryIssueProvider;
 
 export '../services/banking/enable_banking/enable_banking_dependencies.dart';
 export '../services/banking/enable_banking/enable_banking_auth.dart';
@@ -27,6 +30,10 @@ export '../services/banking/enable_banking/enable_banking_exception.dart';
 export '../services/banking/enable_banking/enable_banking_key_generator.dart';
 
 part 'banking_provider.g.dart';
+
+final bankingClockProvider = Provider<DateTime Function()>(
+  (ref) => DateTime.now,
+);
 
 @Riverpod(keepAlive: true)
 BankingProvider bankingService(Ref ref) =>
@@ -63,7 +70,9 @@ BankConsentLifecycleService bankConsentLifecycleService(Ref ref) {
     institutions: ref.watch(bankInstitutionDirectoryProvider),
     readContext: ref.watch(bankAuthorizationContextReaderProvider),
     pendingStore: ref.watch(pendingBankAuthorizationStoreProvider),
+    recoveryStore: const SecureBankSessionRecoveryStore(),
     connections: ref.watch(bankConnectionRepositoryProvider),
+    clock: ref.watch(bankingClockProvider),
     credentialRevision: () => store.credentialRevision,
     cleanupObsoleteConnection: (connection) =>
         cleanupObsoleteEnableBankingConnection(
@@ -125,6 +134,7 @@ class BankCallbackResult extends _$BankCallbackResult {
 @Riverpod(keepAlive: true)
 Future<void> bankingCallbackBootstrap(Ref ref) async {
   if (!BankingPlatformSupport.supportsCallback()) return;
+  await recoverBankSessions(ref);
   await ref
       .read(bankConsentLifecycleServiceProvider)
       .clearExpiredAuthorization();
@@ -134,6 +144,34 @@ Future<void> bankingCallbackBootstrap(Ref ref) async {
         ref.read(bankCallbackResultProvider.notifier).handle,
         onError: ref.read(bankCallbackResultProvider.notifier).reportError,
       );
+}
+
+Future<void> recoverBankSessions(Ref ref) async {
+  try {
+    final result = await ref
+        .read(bankConsentLifecycleServiceProvider)
+        .recoverSessions();
+    if (!ref.mounted) return;
+    ref
+        .read(bankRecoveryIssueProvider.notifier)
+        .reportRecovery(
+          result.unknown > 0
+              ? 'The bank connection outcome is unknown. Check the connection with your bank before starting again.'
+              : result.ownerUnavailable > 0
+              ? 'Restore the original Enable Banking application credentials to finish connection cleanup.'
+              : result.needsAttention
+              ? 'Connection cleanup is incomplete. Retry after restoring connectivity and the original application credentials.'
+              : null,
+        );
+  } catch (_) {
+    if (ref.mounted) {
+      ref
+          .read(bankRecoveryIssueProvider.notifier)
+          .reportRecovery(
+            'Connection recovery could not be checked. Retry before starting another connection.',
+          );
+    }
+  }
 }
 
 @Riverpod(keepAlive: true)
@@ -196,6 +234,9 @@ class EnableBankingSettings extends _$EnableBankingSettings {
       return saved;
     });
     if (operation == _operation) state = result;
+    if (operation == _operation && result.hasValue && result.value != null) {
+      await recoverBankSessions(ref);
+    }
   }
 
   Future<void> clear() async {

@@ -285,8 +285,15 @@ class EnableBankingApi {
     return EbAuthorization.fromJson(json);
   }
 
-  Future<EbSession> createSession(String code) async {
+  Future<EbSession> createSession(
+    String code, {
+    Future<void> Function(String)? onReference,
+  }) async {
     final json = await _post('/sessions', {'code': code});
+    final id = json['session_id'];
+    if (id is String && id.trim().isNotEmpty && onReference != null) {
+      await onReference(id);
+    }
     return EbSession.fromJson(json);
   }
 

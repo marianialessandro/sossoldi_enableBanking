@@ -10,6 +10,44 @@ import 'package:sossoldi/services/banking/lifecycle/pending_bank_authorization_s
 
 void main() {
   setUp(() => FlutterSecureStorage.setMockInitialValues({}));
+  test(
+    'conditional clear preserves a new owner auth or state with the same staged ID',
+    () async {
+      const store = SecurePendingBankAuthorizationStore();
+      final now = DateTime.utc(2032);
+      final original = PendingBankAuthorization(
+        providerId: 'provider',
+        state: 'state-A',
+        authorizationId: 'auth-A',
+        authorizationUrl: 'https://bank.example',
+        applicationId: 'app-A',
+        institutionName: 'Bank',
+        institutionCountry: 'IT',
+        redirectUri: 'sossoldi://eb-callback',
+        expiresAt: now.add(const Duration(minutes: 15)),
+        consentValidUntil: now.add(const Duration(days: 90)),
+        stagedConnectionId: 7,
+        phase: PendingAuthorizationPhase.connectionStaged,
+      );
+      for (final change in [
+        {'provider_id': 'other'},
+        {'application_id': 'app-B'},
+        {'authorization_id': 'auth-B'},
+        {'state': 'state-B'},
+      ]) {
+        final replacement = PendingBankAuthorization.fromJson({
+          ...original.toJson(),
+          ...change,
+        });
+        await store.save(replacement);
+        expect(await store.clearIfCurrent(original), isFalse);
+        expect((await store.read())!.toJson(), replacement.toJson());
+      }
+      await store.save(original);
+      expect(await store.clearIfCurrent(original), isTrue);
+      expect(await store.read(), isNull);
+    },
+  );
 
   test(
     'wrappers on one backend share a coordinator and independent backends do not',

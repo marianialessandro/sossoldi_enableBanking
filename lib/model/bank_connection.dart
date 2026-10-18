@@ -104,6 +104,21 @@ class BankConnection extends BaseEntity {
     super.updatedAt,
   });
 
+  /// Compares the consent selected by a caller without including unrelated update timestamps.
+  bool sameLifecycle(BankConnection other) =>
+      id == other.id &&
+      providerId == other.providerId &&
+      applicationId == other.applicationId &&
+      institutionName == other.institutionName &&
+      institutionCountry == other.institutionCountry &&
+      remoteConnectionId == other.remoteConnectionId &&
+      pendingRemoteConnectionId == other.pendingRemoteConnectionId &&
+      pendingAuthorizationId == other.pendingAuthorizationId &&
+      validUntil?.toUtc() == other.validUntil?.toUtc() &&
+      pendingValidUntil?.toUtc() == other.pendingValidUntil?.toUtc() &&
+      status == other.status &&
+      psuType == other.psuType;
+
   BankConnection copy({
     int? id,
     String? providerId,

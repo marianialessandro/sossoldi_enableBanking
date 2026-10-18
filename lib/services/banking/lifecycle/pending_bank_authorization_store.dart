@@ -20,6 +20,22 @@ abstract class PendingBankAuthorizationStore {
 
 extension PendingBankAuthorizationCoordination
     on PendingBankAuthorizationStore {
+  Future<bool> clearIfCurrent(PendingBankAuthorization expected) =>
+      coordinator.commit(() async {
+        final current = await read();
+        if (current == null ||
+            current.providerId != expected.providerId ||
+            current.applicationId != expected.applicationId ||
+            current.state != expected.state ||
+            current.authorizationId != expected.authorizationId ||
+            current.stagedConnectionId != expected.stagedConnectionId ||
+            current.reconnectConnectionId != expected.reconnectConnectionId) {
+          return false;
+        }
+        await clear();
+        return true;
+      });
+
   BankAuthorizationCoordinator get coordinator {
     final store = this;
     return BankAuthorizationCoordinator.forScope(

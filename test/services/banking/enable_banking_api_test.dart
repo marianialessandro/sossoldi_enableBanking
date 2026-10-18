@@ -55,6 +55,67 @@ http.Response _json(Object body, {int statusCode = 200}) => http.Response(
 );
 
 void main() {
+  for (final invalid in [
+    <String, Object?>{},
+    {'session_id': 4},
+    {'session_id': ''},
+  ]) {
+    test('invalid receipt ID $invalid never invokes the hook', () async {
+      var receipts = 0;
+      final api = _apiWith((_) async => _json(invalid));
+      await expectLater(
+        api.createSession(
+          'synthetic',
+          onReference: (_) async {
+            receipts++;
+          },
+        ),
+        throwsA(anything),
+      );
+      expect(receipts, 0);
+    });
+  }
+  test('receipt failure propagates with one POST and no DTO parse', () async {
+    var calls = 0;
+    final api = _apiWith((_) async {
+      calls++;
+      return _json({'session_id': 'known'});
+    });
+    final failure = StateError('synthetic receipt write');
+    await expectLater(
+      api.createSession(
+        'synthetic',
+        onReference: (_) async {
+          throw failure;
+        },
+      ),
+      throwsA(same(failure)),
+    );
+    expect(calls, 1);
+  });
+  test('session receipt is awaited before malformed DTO parsing', () async {
+    final entered = Completer<void>();
+    final release = Completer<void>();
+    var calls = 0;
+    final api = _apiWith((_) async {
+      calls++;
+      return _json({'session_id': 'known-session', 'accounts': 'invalid'});
+    });
+    final operation = api.createSession(
+      'synthetic',
+      onReference: (id) async {
+        expect(id, 'known-session');
+        entered.complete();
+        await release.future;
+      },
+    );
+    final rejected = expectLater(operation, throwsA(anything));
+    await entered.future;
+    release.complete();
+    await rejected;
+    expect(calls, 1);
+  });
+
   group('EnableBankingApi', () {
     for (final method in ['GET', 'POST', 'DELETE', 'account']) {
       test('$method rejects a token invalidated before dispatch', () async {

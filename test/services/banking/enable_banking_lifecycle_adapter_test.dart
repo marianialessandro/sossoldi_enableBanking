@@ -166,7 +166,7 @@ void main() {
                 order: 0,
               ),
             ),
-          ]),
+          ], expectedStaging: staged.connection),
           throwsFormatException,
         );
         expect(await db.query(bankAccountTable), isEmpty);
@@ -186,7 +186,7 @@ void main() {
                 order: 0,
               ),
             ),
-          ]);
+          ], expectedStaging: staged.connection);
       expect(active.status, BankConnectionStatus.active);
       expect((await db.query(bankAccountTable)).single['startingValue'], 0);
       expect((await db.query(bankAccountTable)).single['currencyCode'], 'EUR');

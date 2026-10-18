@@ -2,6 +2,14 @@ import 'banking_authorization.dart';
 import 'banking_connection.dart';
 import 'banking_reference.dart';
 
+/// Optional receipt capability; alternative providers retain the original consent contract.
+abstract interface class BankConnectionReceiptSource {
+  Future<BankingConnectionResult> createConnectionWithReceipt(
+    String authorizationCode,
+    Future<void> Function(BankingConnectionReference) onReference,
+  );
+}
+
 abstract interface class BankConsentService {
   Future<BankingAuthorization> startAuthorization(
     BankingAuthorizationRequest request,

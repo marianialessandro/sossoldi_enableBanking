@@ -48,6 +48,7 @@ class BankAuthorizationCoordinator {
   Future<void>? _commits;
   Future<void>? _callbacks;
   Future<void>? _cleanup;
+  final _callbackFlights = <Object, Future<StagedBankConnection>>{};
   Future<AuthorizationAttempt>? _start;
   Object? _startKey;
   Future<Object>? _startContextKey;
@@ -57,6 +58,29 @@ class BankAuthorizationCoordinator {
     _start = null;
     _startKey = null;
     _startContextKey = null;
+  }
+
+  Future<StagedBankConnection> completeCallback(
+    Object key,
+    Future<StagedBankConnection> Function() operation,
+  ) {
+    final existing = _callbackFlights[key];
+    if (existing != null) return existing;
+    final result = callback(operation);
+    _callbackFlights[key] = result;
+    void release() {
+      if (identical(_callbackFlights[key], result)) {
+        _callbackFlights.remove(key);
+      }
+    }
+
+    unawaited(
+      result.then<void>(
+        (_) => release(),
+        onError: (Object _, StackTrace _) => release(),
+      ),
+    );
+    return result;
   }
 
   Future<T> commit<T>(Future<T> Function() operation) {
