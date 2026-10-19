@@ -38,12 +38,13 @@ class _Auth extends EnableBankingAuth {
 
 class RecoveryLinks implements UriLinkSource {
   int starts = 0;
+  Uri? initialUri;
   @override
   Stream<Uri> get uriStream => const Stream.empty();
   @override
   Future<Uri?> getInitialUri() async {
     starts++;
-    return null;
+    return initialUri;
   }
 }
 
@@ -166,6 +167,7 @@ class BankingRecoveryHarness {
   Future<void> initialize({
     BankSyncService? syncService,
     bool bootstrap = true,
+    PendingBankAuthorizationStore? pendingStore,
   }) async {
     FlutterSecureStorage.setMockInitialValues({});
     sqfliteFfiInit();
@@ -263,6 +265,8 @@ class BankingRecoveryHarness {
         enableBankingCredentialsStoreProvider.overrideWithValue(store),
         enableBankingApiProvider.overrideWithValue(api),
         bankConnectionRepositoryProvider.overrideWithValue(repository),
+        if (pendingStore != null)
+          pendingBankAuthorizationStoreProvider.overrideWithValue(pendingStore),
         bankingClockProvider.overrideWithValue(() => now),
         bankDeeplinkServiceProvider.overrideWithValue(
           BankDeeplinkService(source: links),

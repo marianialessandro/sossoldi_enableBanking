@@ -183,6 +183,7 @@ Future<BankSyncSummary> bankConnectionSyncStatus(Ref ref, int connectionId) =>
 @Riverpod(keepAlive: true)
 class BankRecoveryIssue extends _$BankRecoveryIssue {
   String? _recoveryIssue;
+  String? _callbackIssue;
   String? _importIssue;
   final List<BankConnection?> _importConnections = [];
   String? _syncIssue;
@@ -199,9 +200,15 @@ class BankRecoveryIssue extends _$BankRecoveryIssue {
     _publish();
   }
 
+  void reportCallbackRecovery(String? message) {
+    _callbackIssue = message;
+    _publish();
+  }
+
   void _publish() {
     final messages = [
       _recoveryIssue,
+      _callbackIssue,
       _importIssue,
       _syncIssue,
     ].nonNulls.toSet();
@@ -995,11 +1002,25 @@ Future<void> bankingUiBootstrap(Ref ref) async {
   final lifecycle = BankSyncLifecycle(
     service: ref.read(bankSyncServiceProvider),
     prepare: () async {
-      ref.invalidate(bankingCallbackBootstrapProvider);
-      await ref.read(bankingCallbackBootstrapProvider.future);
+      try {
+        ref.invalidate(bankingCallbackBootstrapProvider);
+        await ref.read(bankingCallbackBootstrapProvider.future);
+        if (!ref.mounted) return false;
+      } catch (_) {
+        if (!ref.mounted) return false;
+        ref
+            .read(bankRecoveryIssueProvider.notifier)
+            .reportCallbackRecovery(
+              'The bank callback or pending authorization could not be recovered. Retry the connection recovery. Other connected banks can still sync.',
+            );
+      }
       if (!ref.mounted) return false;
       final credentials = await ref.read(enableBankingSettingsProvider.future);
       if (credentials == null || !ref.mounted) return false;
+      final available = await ref
+          .read(enableBankingSettingsProvider.notifier)
+          .hasCredentials();
+      if (!available || !ref.mounted) return false;
       try {
         await ref.read(connectBankFlowProvider.notifier).resumeImport();
       } catch (_) {

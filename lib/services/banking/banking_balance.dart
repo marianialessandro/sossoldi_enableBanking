@@ -7,7 +7,10 @@ class BankingBalance {
   final BankingMoney amount;
   final BankingBalanceKind kind;
   final DateTime? referenceDate;
+
+  /// Last change of the amount, not the time of the HTTP acquisition.
   final DateTime? observedAt;
+  final DateTime? acquiredAt;
   final String? lastCommittedEntryId;
 
   const BankingBalance({
@@ -16,6 +19,7 @@ class BankingBalance {
     required this.kind,
     this.referenceDate,
     this.observedAt,
+    this.acquiredAt,
     this.lastCommittedEntryId,
   });
 }

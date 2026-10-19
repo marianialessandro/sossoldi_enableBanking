@@ -116,7 +116,11 @@ class BankCallbackResult extends _$BankCallbackResult {
         .handleCallback(
           callback,
           onStaged: (staged) async {
+            if (!ref.mounted) return;
             state = BankCallbackResultState(connectionId: staged.connection.id);
+            ref
+                .read(bankRecoveryIssueProvider.notifier)
+                .reportCallbackRecovery(null);
           },
           onError: reportError,
         );
@@ -127,23 +131,50 @@ class BankCallbackResult extends _$BankCallbackResult {
   void reset() => state = const BankCallbackResultState();
 
   Future<void> reportError(Object error) async {
+    if (!ref.mounted) return;
     state = BankCallbackResultState(error: error);
+    ref
+        .read(bankRecoveryIssueProvider.notifier)
+        .reportCallbackRecovery(
+          'The bank callback could not be recovered. Retry the connection recovery. Other connected banks can still sync.',
+        );
   }
 }
 
 @Riverpod(keepAlive: true)
 Future<void> bankingCallbackBootstrap(Ref ref) async {
   if (!BankingPlatformSupport.supportsCallback()) return;
-  await recoverBankSessions(ref);
-  await ref
-      .read(bankConsentLifecycleServiceProvider)
-      .clearExpiredAuthorization();
-  await ref
-      .watch(bankDeeplinkServiceProvider)
-      .start(
-        ref.read(bankCallbackResultProvider.notifier).handle,
-        onError: ref.read(bankCallbackResultProvider.notifier).reportError,
-      );
+  try {
+    await recoverBankSessions(ref);
+    if (!ref.mounted) return;
+    await ref
+        .read(bankConsentLifecycleServiceProvider)
+        .clearExpiredAuthorization();
+    if (!ref.mounted) return;
+    var callbackFailed = false;
+    await ref
+        .watch(bankDeeplinkServiceProvider)
+        .start(
+          ref.read(bankCallbackResultProvider.notifier).handle,
+          onError: (error) async {
+            callbackFailed = true;
+            if (ref.mounted) {
+              await ref
+                  .read(bankCallbackResultProvider.notifier)
+                  .reportError(error);
+            }
+          },
+        );
+    if (ref.mounted &&
+        !callbackFailed &&
+        ref.read(bankCallbackResultProvider).error == null) {
+      ref.read(bankRecoveryIssueProvider.notifier).reportCallbackRecovery(null);
+    }
+  } catch (error) {
+    if (ref.mounted) {
+      await ref.read(bankCallbackResultProvider.notifier).reportError(error);
+    }
+  }
 }
 
 Future<void> recoverBankSessions(Ref ref) async {

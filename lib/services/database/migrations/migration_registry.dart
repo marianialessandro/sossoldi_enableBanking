@@ -17,6 +17,7 @@ import '0006_migrate_icons_name.dart';
 import '0007_add_deleted_at.dart';
 import '0008_add_bank_consent_lifecycle.dart';
 import '0009_add_bank_sync_integrity.dart';
+import '0010_fix_bank_note_override.dart';
 
 import '../migration_base.dart';
 
@@ -35,6 +36,7 @@ List<Migration> getMigrations() {
     AddDeletedAt(),
     AddBankConsentLifecycle(),
     AddBankSyncIntegrity(),
+    FixBankNoteOverride(),
   ];
 }
 

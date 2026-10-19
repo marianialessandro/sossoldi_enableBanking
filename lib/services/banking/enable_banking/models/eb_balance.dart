@@ -40,6 +40,15 @@ DateTime? _balanceDate(Object? raw, {bool timestamp = false}) {
       : DateTime.utc(date.year, date.month, date.day);
 }
 
+DateTime? _acquisitionDate(Object? raw) {
+  if (raw is! String) return null;
+  try {
+    return _balanceDate(raw, timestamp: true);
+  } on FormatException {
+    return null;
+  }
+}
+
 /// An account balance as returned by `GET /accounts/{uid}/balances`.
 class EbBalance {
   final String name;
@@ -47,6 +56,7 @@ class EbBalance {
   final String? balanceType;
   final DateTime? referenceDate;
   final DateTime? lastChangeDateTime;
+  final DateTime? acquiredAt;
   final String? lastCommittedTransaction;
 
   const EbBalance({
@@ -55,6 +65,7 @@ class EbBalance {
     this.balanceType,
     this.referenceDate,
     this.lastChangeDateTime,
+    this.acquiredAt,
     this.lastCommittedTransaction,
   });
 
@@ -70,5 +81,6 @@ class EbBalance {
       timestamp: true,
     ),
     lastCommittedTransaction: json['last_committed_transaction'] as String?,
+    acquiredAt: _acquisitionDate(json['_server_date']),
   );
 }

@@ -363,7 +363,12 @@ class EnableBankingApi {
       psuHeaders,
     );
     return (json['balances'] as List)
-        .map((e) => EbBalance.fromJson(e as Map<String, dynamic>))
+        .map(
+          (e) => EbBalance.fromJson({
+            ...e as Map<String, dynamic>,
+            '_server_date': json['_server_date'],
+          }),
+        )
         .toList();
   }
 
