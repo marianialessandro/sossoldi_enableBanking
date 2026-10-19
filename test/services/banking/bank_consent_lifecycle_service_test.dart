@@ -12,6 +12,7 @@ import 'package:sossoldi/services/banking/banking_exception.dart';
 import 'package:sossoldi/services/banking/banking_reference.dart';
 import 'package:sossoldi/services/banking/lifecycle/bank_authorization_callback.dart';
 import 'package:sossoldi/services/banking/lifecycle/bank_authorization_coordinator.dart';
+import 'package:sossoldi/services/banking/lifecycle/bank_authorization_result.dart';
 import 'package:sossoldi/services/banking/lifecycle/bank_consent_lifecycle_service.dart';
 import 'package:sossoldi/services/banking/lifecycle/pending_bank_authorization.dart';
 import 'package:sossoldi/services/banking/lifecycle/pending_bank_authorization_store.dart';
@@ -23,12 +24,21 @@ class _MemoryPendingStore implements PendingBankAuthorizationStore {
   PendingBankAuthorization? value;
   Completer<void>? saveEntered;
   Completer<void>? saveGate;
+  Completer<void>? readEntered;
+  Completer<void>? readGate;
 
   @override
   Future<void> clear() async => value = null;
 
   @override
-  Future<PendingBankAuthorization?> read() async => value;
+  Future<PendingBankAuthorization?> read() async {
+    final gate = readGate;
+    if (readEntered != null && !readEntered!.isCompleted) {
+      readEntered!.complete();
+    }
+    await gate?.future;
+    return value;
+  }
 
   @override
   Future<void> save(PendingBankAuthorization pending) async {
@@ -208,6 +218,157 @@ void main() {
   }
 
   test(
+    'RECOVERY owner captured synchronously cancels POST before pending',
+    () async {
+      api.entered = Completer<void>();
+      api.startGate = Completer<void>();
+      BankAuthorizationOwner? owner;
+      final first = service().startAuthorization(
+        bank(),
+        onOwner: (value) => owner = value,
+      );
+      expect(owner, isNotNull);
+      final rejected = expectLater(first, throwsA(isA<BankingException>()));
+      await api.entered!.future;
+      expect(pending.value, isNull);
+      expect(await service().cancelAuthorizationIfCurrent(owner!), isTrue);
+      api.startGate!.complete();
+      await rejected;
+      expect(pending.value, isNull);
+      expect(api.deleteCalls, 0);
+    },
+  );
+
+  test(
+    'RECOVERY owner stale A cannot invalidate B without persisted pending',
+    () async {
+      api.entered = Completer<void>();
+      api.startGate = Completer<void>();
+      BankAuthorizationOwner? firstOwner;
+      final first = service().startAuthorization(
+        bank(),
+        onOwner: (value) => firstOwner = value,
+      );
+      final rejected = expectLater(first, throwsA(isA<BankingException>()));
+      await api.entered!.future;
+      expect(await service().cancelAuthorizationIfCurrent(firstOwner!), isTrue);
+      api.entered = null;
+      BankAuthorizationOwner? secondOwner;
+      final second = service().startAuthorization(
+        bank(name: 'Other Bank'),
+        onOwner: (value) => secondOwner = value,
+      );
+      final revision = pending.coordinator.revision;
+      expect(
+        await service().cancelAuthorizationIfCurrent(firstOwner!),
+        isFalse,
+      );
+      expect(pending.coordinator.revision, revision);
+      expect(identical(firstOwner, secondOwner), isFalse);
+      api.startGate!.complete();
+      await rejected;
+      await second;
+      expect(pending.value!.institutionName, 'Other Bank');
+    },
+  );
+
+  test(
+    'RECOVERY owner adopts persisted pending across lifecycle wrappers',
+    () async {
+      await service().startAuthorization(bank());
+      final owner = await service().captureAuthorizationOwner();
+      expect(owner, isNotNull);
+      expect(await service().cancelAuthorizationIfCurrent(owner!), isTrue);
+      expect(pending.value, isNull);
+      expect(await service().cancelAuthorizationIfCurrent(owner), isFalse);
+    },
+  );
+
+  test(
+    'RECOVERY owner cancellation during pending save rejects late save',
+    () async {
+      pending.saveEntered = Completer<void>();
+      pending.saveGate = Completer<void>();
+      BankAuthorizationOwner? owner;
+      final first = service().startAuthorization(
+        bank(),
+        onOwner: (value) => owner = value,
+      );
+      final rejected = expectLater(first, throwsA(isA<BankingException>()));
+      await pending.saveEntered!.future;
+      final cancelled = service().cancelAuthorizationIfCurrent(owner!);
+      await Future<void>.value();
+      pending.saveGate!.complete();
+      expect(await cancelled, isTrue);
+      await rejected;
+      expect(pending.value, isNull);
+    },
+  );
+
+  test(
+    'RECOVERY owner replacement pending has a different generation at the same revision',
+    () async {
+      await service().startAuthorization(bank());
+      final owner = (await service().captureAuthorizationOwner())!;
+      pending.value = PendingBankAuthorization.fromJson({
+        ...pending.value!.toJson(),
+        'state': 'replacement',
+        'authorization_id': 'replacement',
+      });
+      final replacement = (await service().captureAuthorizationOwner())!;
+      expect(replacement.sameGeneration(owner), isFalse);
+      final revision = pending.coordinator.revision;
+      expect(await service().cancelAuthorizationIfCurrent(owner), isFalse);
+      expect(pending.coordinator.revision, revision);
+      expect(pending.value!.state, 'replacement');
+    },
+  );
+
+  test(
+    'RECOVERY owner read suspended while B starts cannot invalidate B',
+    () async {
+      await service().startAuthorization(bank());
+      final owner = (await service().captureAuthorizationOwner())!;
+      pending.readEntered = Completer<void>();
+      final release = pending.readGate = Completer<void>();
+      final cancelled = service().cancelAuthorizationIfCurrent(owner);
+      await pending.readEntered!.future;
+      pending.readGate = null;
+      await service().cancelAuthorization();
+      await service().startAuthorization(bank(name: 'Other Bank'));
+      final revision = pending.coordinator.revision;
+      release.complete();
+      expect(await cancelled, isFalse);
+      expect(pending.coordinator.revision, revision);
+      expect(pending.value!.institutionName, 'Other Bank');
+    },
+  );
+
+  test(
+    'RECOVERY owner callback in flight is invalidated and cleaned under its owner',
+    () async {
+      await service().startAuthorization(bank());
+      final owner = (await service().captureAuthorizationOwner())!;
+      api.entered = Completer<void>();
+      api.createGate = Completer<void>();
+      final callback = service().completeCallback(
+        BankAuthorizationCallback(
+          code: 'synthetic',
+          state: pending.value!.state,
+        ),
+      );
+      final rejected = expectLater(callback, throwsA(isA<BankingException>()));
+      await api.entered!.future;
+      expect(await service().cancelAuthorizationIfCurrent(owner), isTrue);
+      api.createGate!.complete();
+      await rejected;
+      expect(await repository.selectAll(), isEmpty);
+      expect(pending.value, isNull);
+      expect(api.deleteCalls, 1);
+    },
+  );
+
+  test(
     'duplicate in-flight callbacks share the exact result across wrappers',
     () async {
       await service().startAuthorization(api.aspsps.single);
@@ -225,6 +386,45 @@ void main() {
       final results = await Future.wait([first, duplicate]);
       expect(identical(results.first, results.last), isTrue);
       expect(api.createCalls, 1);
+    },
+  );
+
+  test(
+    'RECOVERY owner captured from pending save remains cancellable',
+    () async {
+      pending.saveEntered = Completer<void>();
+      pending.saveGate = Completer<void>();
+      final first = service().startAuthorization(bank());
+      final rejected = expectLater(first, throwsA(isA<BankingException>()));
+      await pending.saveEntered!.future;
+      final owner = (await service().captureAuthorizationOwner())!;
+      final cancelled = service().cancelAuthorizationIfCurrent(owner);
+      await Future<void>.value();
+      pending.saveGate!.complete();
+      expect(await cancelled, isTrue);
+      await rejected;
+      expect(pending.value, isNull);
+    },
+  );
+
+  test(
+    'RECOVERY owner expiry creates new generation even without revision change',
+    () async {
+      await service().startAuthorization(bank());
+      final owner = (await service().captureAuthorizationOwner())!;
+      pending.value = PendingBankAuthorization.fromJson({
+        ...pending.value!.toJson(),
+        'expires_at': now
+            .subtract(const Duration(seconds: 1))
+            .toIso8601String(),
+      });
+      final expired = (await service().captureAuthorizationOwner())!;
+      final next = await service().startAuthorization(bank());
+      expect(next.owner!.sameGeneration(expired), isFalse);
+      expect(next.owner!.sameGeneration(owner), isFalse);
+      expect(await service().cancelAuthorizationIfCurrent(expired), isFalse);
+      expect(pending.value, isNotNull);
+      expect(api.startCalls, 2);
     },
   );
 

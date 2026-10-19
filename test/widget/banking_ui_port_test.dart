@@ -91,6 +91,9 @@ class _Accounts extends Accounts {
 
 class _Flow extends ConnectBankFlow {
   List<BankAccountImportSelection>? selected;
+  // These display fixtures have no authorization backend; concurrent actions use the real recovery harness.
+  @override
+  Future<void> refreshAuthorization() async {}
   @override
   ConnectBankFlowState build() =>
       ConnectBankFlowState(connection: connection, importable: [remoteAccount]);

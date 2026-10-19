@@ -27,8 +27,15 @@ class ConnectionCard extends ConsumerStatefulWidget {
 
 class _ConnectionCardState extends ConsumerState<ConnectionCard> {
   bool _syncing = false;
-  bool _disconnecting = false;
   bool _resuming = false;
+  final _localFocus = FocusNode(debugLabel: 'Disconnect locally');
+  final _revokeFocus = FocusNode(debugLabel: 'Disconnect and revoke');
+  @override
+  void dispose() {
+    _localFocus.dispose();
+    _revokeFocus.dispose();
+    super.dispose();
+  }
 
   Future<void> _resume() async {
     if (_resuming) return;
@@ -42,20 +49,21 @@ class _ConnectionCardState extends ConsumerState<ConnectionCard> {
 
   BankConnection get connection => widget.connection;
 
-  Future<void> _disconnect(BuildContext context, WidgetRef ref) async {
-    setState(() => _disconnecting = true);
-    try {
-      await ref.read(connectBankFlowProvider.notifier).disconnect(connection);
-      if (!context.mounted) return;
-      showSnackBar(context, message: "Bank disconnected");
-    } on EnableBankingAuthException catch (e) {
-      if (!context.mounted) return;
-      showSnackBar(context, message: bankingErrorMessage(e));
-    } catch (e) {
-      if (!context.mounted) return;
-      showSnackBar(context, message: bankingErrorMessage(e));
-    } finally {
-      if (mounted) setState(() => _disconnecting = false);
+  Future<void> _confirmDisconnect({required bool local}) async {
+    final expected = connection;
+    (local ? _localFocus : _revokeFocus).requestFocus();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => local
+          ? ConfirmLocalDisconnectDialog(connection: expected)
+          : ConfirmDisconnectDialog(connection: expected),
+    );
+    if (confirmed != true || !mounted) return;
+    final flow = ref.read(connectBankFlowProvider.notifier);
+    if (local) {
+      await flow.disconnectLocally(expected);
+    } else {
+      await flow.disconnect(expected);
     }
   }
 
@@ -110,6 +118,14 @@ class _ConnectionCardState extends ConsumerState<ConnectionCard> {
 
   @override
   Widget build(BuildContext context) {
+    final recovery = ref
+        .watch(connectBankFlowProvider)
+        .recoveryActions
+        .where((item) => item.concerns(connection));
+    final action = recovery.isEmpty ? null : recovery.last;
+    final busy = action?.status == BankRecoveryActionStatus.running;
+    final configured = ref.watch(enableBankingSettingsProvider).value;
+    final canRevoke = configured?.appId == connection.applicationId;
     final accounts = ref.watch(accountsProvider).value ?? const <BankAccount>[];
     final linked = accounts
         .where((account) => account.ebConnectionId == connection.id)
@@ -189,7 +205,50 @@ class _ConnectionCardState extends ConsumerState<ConnectionCard> {
             error: (_, _) =>
                 const Text('Could not load the last sync result. Try again.'),
           ),
-          const SizedBox(height: Sizes.md),
+          if (!canRevoke)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: Sizes.lg),
+              child: Text(
+                bankRecoveryCredentialsMessage,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: Theme.of(context).colorScheme.onSurface,
+                ),
+              ),
+            ),
+          if (action != null &&
+              action.status != BankRecoveryActionStatus.applied &&
+              action.status != BankRecoveryActionStatus.stale)
+            Semantics(
+              liveRegion: true,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: Sizes.lg),
+                child: Text(
+                  action.message,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurface,
+                  ),
+                ),
+              ),
+            ),
+          if (action?.status == BankRecoveryActionStatus.failed)
+            TextButton(
+              onPressed:
+                  busy ||
+                      (!canRevoke &&
+                          action?.kind == BankRecoveryActionKind.revoke)
+                  ? null
+                  : () => _confirmDisconnect(
+                      local: action?.kind == BankRecoveryActionKind.local,
+                    ),
+              child: const Text('Try again'),
+            ),
+          TextButton(
+            focusNode: _localFocus,
+            onPressed: busy ? null : () => _confirmDisconnect(local: true),
+            style: TextButton.styleFrom(minimumSize: const Size(48, 48)),
+            child: const Text('Disconnect locally'),
+          ),
+          const SizedBox(height: Sizes.lg),
           const Divider(height: 1, color: grey2),
           if (connection.pendingRemoteConnectionId != null)
             TextButton(
@@ -236,29 +295,17 @@ class _ConnectionCardState extends ConsumerState<ConnectionCard> {
                           ? null
                           : () => _sync(context, ref),
                     ),
-              _disconnecting
-                  ? const Padding(
-                      padding: EdgeInsets.all(Sizes.sm),
-                      child: SizedBox(
-                        width: 24,
-                        height: 24,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      ),
-                    )
-                  : IconButton(
-                      tooltip: 'Disconnect ${connection.institutionName}',
-                      icon: const Icon(Icons.link_off, color: red),
-                      onPressed: () => showDialog(
-                        context: context,
-                        builder: (dialogContext) => ConfirmDisconnectDialog(
-                          connection: connection,
-                          onPressed: () {
-                            Navigator.of(dialogContext).pop();
-                            _disconnect(context, ref);
-                          },
-                        ),
-                      ),
-                    ),
+              IconButton(
+                focusNode: _revokeFocus,
+                tooltip: 'Disconnect and revoke ${connection.institutionName}',
+                icon: Icon(
+                  Icons.link_off,
+                  color: Theme.of(context).colorScheme.error,
+                ),
+                onPressed: busy || !canRevoke
+                    ? null
+                    : () => _confirmDisconnect(local: false),
+              ),
             ],
           ),
         ],

@@ -7,6 +7,7 @@ import '../../../services/banking/bank_institution.dart';
 import '../../../ui/device.dart';
 import '../../../ui/snack_bars/snack_bar.dart';
 import '../../../ui/widgets/rounded_icon.dart';
+import 'confirm_disconnect_dialog.dart';
 
 /// Bottom sheet content: the banks available in the chosen country. Tapping one starts the Enable Banking authorization and hands the user over to the bank consent page in an external browser.
 class AspspSelector extends ConsumerStatefulWidget {
@@ -25,7 +26,7 @@ class AspspSelector extends ConsumerStatefulWidget {
 
 class _AspspSelectorState extends ConsumerState<AspspSelector> {
   bool loading = true;
-  bool connecting = false;
+  Object? _connectingOperation;
   String? error;
 
   @override
@@ -55,38 +56,51 @@ class _AspspSelectorState extends ConsumerState<AspspSelector> {
   }
 
   Future<void> _connect(BankInstitution aspsp) async {
-    setState(() => connecting = true);
+    final flow = ref.read(connectBankFlowProvider.notifier);
+    if (ref.read(connectBankFlowProvider).authorizationOwner != null) return;
+    final operation = Object();
+    _connectingOperation = operation;
+    final credentials = ref
+        .read(enableBankingCredentialsStoreProvider)
+        .credentialRevision;
+    final future = flow.startConnection(aspsp);
+    final generation = flow.authorizationOperation;
+    final expected = ref.read(connectBankFlowProvider).authorizationOwner;
+    bool current() =>
+        mounted &&
+        identical(_connectingOperation, operation) &&
+        expected != null &&
+        ref
+                .read(connectBankFlowProvider)
+                .authorizationOwner
+                ?.sameGeneration(expected) ==
+            true;
     try {
-      final result = await ref
-          .read(connectBankFlowProvider.notifier)
-          .startConnection(aspsp);
+      final result = await future;
       if (!mounted) return;
-
+      if (!current() || !flow.isAuthorizationResultCurrent(result)) return;
       if (!result.opened) {
         showSnackBar(
           context,
-          message: 'Could not open the browser. Tap the bank to retry.',
+          message:
+              'Could not open the browser. Try again to resume the same authorization.',
         );
         return;
       }
       Navigator.pop(context);
-    } on EnableBankingException catch (e) {
-      if (!mounted) return;
-      showSnackBar(context, message: bankingErrorMessage(e));
-    } on EnableBankingAuthException catch (e) {
-      if (!mounted) return;
-      showSnackBar(context, message: bankingErrorMessage(e));
-    } catch (e) {
-      if (!mounted) return;
-      showSnackBar(context, message: bankingErrorMessage(e));
-    } finally {
-      if (mounted) setState(() => connecting = false);
+    } catch (error) {
+      if (mounted &&
+          identical(_connectingOperation, operation) &&
+          flow.isAuthorizationOperationCurrent(generation, credentials)) {
+        setState(() => this.error = bankingErrorMessage(error));
+      }
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final aspsps = ref.watch(connectBankFlowProvider).aspsps;
+    final flow = ref.watch(connectBankFlowProvider);
+    final aspsps = flow.aspsps;
 
     return Container(
       color: Theme.of(context).colorScheme.primaryContainer,
@@ -100,11 +114,22 @@ class _AspspSelectorState extends ConsumerState<AspspSelector> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  if (loading || connecting)
+                  if (flow.authorizationOwner != null)
+                    Padding(
+                      padding: const EdgeInsets.all(Sizes.lg),
+                      child: AuthorizationRecoveryControls(
+                        onResumed: () {
+                          if (mounted) Navigator.pop(context);
+                        },
+                      ),
+                    ),
+                  if (loading || flow.authorizing)
                     const Padding(
                       padding: EdgeInsets.all(Sizes.xl),
                       child: Center(child: CircularProgressIndicator()),
                     )
+                  else if (flow.authorizationOwner != null)
+                    const SizedBox.shrink()
                   else if (error != null)
                     Padding(
                       padding: const EdgeInsets.all(Sizes.xl),

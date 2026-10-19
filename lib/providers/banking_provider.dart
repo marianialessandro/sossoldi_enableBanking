@@ -20,7 +20,8 @@ import '../services/banking/lifecycle/banking_platform_support.dart';
 import '../services/banking/lifecycle/pending_bank_authorization_store.dart';
 import '../services/banking/lifecycle/bank_session_recovery_store.dart';
 import '../services/database/repositories/bank_connection_repository.dart';
-import 'banking_ui_provider.dart' show bankRecoveryIssueProvider;
+import 'banking_ui_provider.dart'
+    show bankRecoveryIssueProvider, connectBankFlowProvider;
 
 export '../services/banking/enable_banking/enable_banking_dependencies.dart';
 export '../services/banking/enable_banking/enable_banking_auth.dart';
@@ -124,6 +125,9 @@ class BankCallbackResult extends _$BankCallbackResult {
           },
           onError: reportError,
         );
+    if (ref.mounted) {
+      await ref.read(connectBankFlowProvider.notifier).refreshAuthorization();
+    }
     if (state.processing) state = const BankCallbackResultState();
     return disposition;
   }
@@ -150,6 +154,8 @@ Future<void> bankingCallbackBootstrap(Ref ref) async {
     await ref
         .read(bankConsentLifecycleServiceProvider)
         .clearExpiredAuthorization();
+    if (!ref.mounted) return;
+    await ref.read(connectBankFlowProvider.notifier).refreshAuthorization();
     if (!ref.mounted) return;
     var callbackFailed = false;
     await ref

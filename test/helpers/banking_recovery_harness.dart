@@ -24,11 +24,19 @@ import 'package:sossoldi/services/banking/sync/bank_sync_result.dart';
 import 'package:sossoldi/services/banking/sync/bank_sync_request.dart';
 import 'package:sossoldi/services/banking/sync/bank_sync_service.dart';
 import 'package:sossoldi/services/database/migration_manager.dart';
+import 'package:sossoldi/services/database/sossoldi_database.dart';
 import 'package:sossoldi/services/database/repositories/bank_connection_repository.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import '../services/banking/enable_banking_auth_test.dart'
     show testPrivateKeyPem;
+
+class _RecoveryDatabase extends SossoldiDatabase {
+  final Database value;
+  _RecoveryDatabase(this.value);
+  @override
+  Future<Database> get database async => value;
+}
 
 class _Auth extends EnableBankingAuth {
   @override
@@ -139,6 +147,13 @@ class BankingRecoveryHarness {
   bool deleteFails = false;
   int deletes = 0;
   int posts = 0;
+  int authPosts = 0;
+  bool allowSessionCreation = false;
+  int deleteStatus = 204;
+  String deleteBody = '{}';
+  final deletePaths = <String>[];
+  Completer<void>? authEntered;
+  Completer<void>? authGate;
   int syncCalls = 0;
   final accountCalls = <String>[];
   final balanceCalls = <String>[];
@@ -175,7 +190,7 @@ class BankingRecoveryHarness {
     db = await databaseFactoryFfi.openDatabase(
       inMemoryDatabasePath,
       options: OpenDatabaseOptions(
-        version: 9,
+        version: manager.latestVersion,
         onCreate: (db, version) => manager.migrate(db, 0, version),
       ),
     );
@@ -186,14 +201,49 @@ class BankingRecoveryHarness {
       client: MockClient((request) async {
         if (request.method == 'DELETE') {
           deletes++;
+          deletePaths.add(request.url.path);
           if (deleteEntered != null && !deleteEntered!.isCompleted) {
             deleteEntered!.complete();
           }
           await deleteGate?.future;
-          return http.Response('{}', deleteFails ? 500 : 204);
+          return http.Response(deleteBody, deleteFails ? 500 : deleteStatus);
+        }
+        if (request.method == 'POST' && request.url.path == '/auth') {
+          authPosts++;
+          if (authEntered != null && !authEntered!.isCompleted) {
+            authEntered!.complete();
+          }
+          await authGate?.future;
+          return http.Response(
+            jsonEncode({
+              'authorization_id': 'auth-$authPosts',
+              'psu_id_hash': 'qa-psu',
+              'url': 'https://bank.example/authorize',
+            }),
+            200,
+          );
         }
         if (request.method == 'POST') {
           posts++;
+          if (allowSessionCreation && request.url.path == '/sessions') {
+            return http.Response(
+              jsonEncode({
+                'session_id': 'session',
+                'aspsp': {'name': 'Test Bank', 'country': 'IT'},
+                'psu_type': 'personal',
+                'access': {
+                  'valid_until': now
+                      .add(const Duration(days: 90))
+                      .toIso8601String(),
+                },
+                'accounts': [
+                  for (final uid in remoteUids)
+                    {'uid': uid, 'identification_hash': 'hash-$uid'},
+                ],
+              }),
+              200,
+            );
+          }
           throw StateError('Unexpected replay');
         }
         if (request.url.path == '/application') {
@@ -261,6 +311,7 @@ class BankingRecoveryHarness {
     );
     container = ProviderContainer(
       overrides: [
+        databaseProvider.overrideWithValue(_RecoveryDatabase(db)),
         if (!bootstrap) bankingUiBootstrapProvider.overrideWith((ref) async {}),
         enableBankingCredentialsStoreProvider.overrideWithValue(store),
         enableBankingApiProvider.overrideWithValue(api),

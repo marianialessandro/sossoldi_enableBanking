@@ -44,6 +44,9 @@ class BankAuthorizationCoordinator {
   BankAuthorizationCoordinator._();
 
   int revision = 0;
+  BankAuthorizationOwner? authorizationOwner;
+  Object? authorizationKey;
+  bool authorizationSaving = false;
   final unresolvedConnections = <ObsoleteBankConnection>[];
   Future<void>? _commits;
   Future<void>? _callbacks;
@@ -55,6 +58,8 @@ class BankAuthorizationCoordinator {
 
   void invalidate() {
     ++revision;
+    authorizationOwner = null;
+    authorizationKey = null;
     _start = null;
     _startKey = null;
     _startContextKey = null;
@@ -174,7 +179,13 @@ class BankAuthorizationCoordinator {
     unawaited(
       result.then<void>(
         (_) => release(),
-        onError: (Object _, StackTrace _) => release(),
+        onError: (Object _, StackTrace _) {
+          if (authorizationOwner?.pending == null && authorizationKey == key) {
+            authorizationOwner = null;
+            authorizationKey = null;
+          }
+          release();
+        },
       ),
     );
     return result;

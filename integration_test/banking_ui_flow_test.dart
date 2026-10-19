@@ -22,6 +22,7 @@ import 'package:sossoldi/services/banking/lifecycle/bank_authorization_result.da
 import 'package:sossoldi/services/banking/lifecycle/bank_consent_lifecycle_service.dart';
 import 'package:sossoldi/services/banking/lifecycle/bank_deeplink_service.dart';
 import 'package:sossoldi/services/banking/lifecycle/pending_bank_authorization_store.dart';
+import 'package:sossoldi/services/banking/lifecycle/bank_session_recovery_store.dart';
 import 'package:sossoldi/services/banking/sync/bank_sync_service.dart';
 import 'package:sossoldi/services/database/repositories/bank_connection_repository.dart';
 import 'package:sossoldi/services/database/sossoldi_database.dart';
@@ -36,12 +37,26 @@ class _Links implements UriLinkSource {
 
 class _ConsentLauncher extends BankConsentLifecycleService {
   bool browserOpens = false;
-  _ConsentLauncher(Ref ref, DateTime now)
-    : super(
+  int launchCalls = 0;
+  final launchedUrls = <Uri>[];
+  _ConsentLauncher(
+    Ref ref,
+    DateTime now,
+    EnableBankingCredentialsStore store,
+    EnableBankingApi api,
+  ) : super(
         consent: ref.read(bankConsentServiceProvider),
         institutions: ref.read(bankInstitutionDirectoryProvider),
         readContext: ref.read(bankAuthorizationContextReaderProvider),
         pendingStore: ref.read(pendingBankAuthorizationStoreProvider),
+        recoveryStore: const SecureBankSessionRecoveryStore(),
+        credentialRevision: () => store.credentialRevision,
+        cleanupObsoleteConnection: (connection) =>
+            cleanupObsoleteEnableBankingConnection(
+              store: store,
+              api: api,
+              connection: connection,
+            ),
         connections: ref.read(bankConnectionRepositoryProvider),
         clock: () => now,
       );
@@ -49,7 +64,14 @@ class _ConsentLauncher extends BankConsentLifecycleService {
   Future<AuthorizationLaunchResult> launchAuthorization(
     Uri url, {
     AuthorizationUrlLauncher? launcher,
-  }) async => AuthorizationLaunchResult(url: url, opened: browserOpens);
+  }) {
+    launchCalls++;
+    launchedUrls.add(url);
+    return super.launchAuthorization(
+      url,
+      launcher: launcher ?? (_) async => browserOpens,
+    );
+  }
 }
 
 class _Sandbox {
@@ -188,25 +210,48 @@ void main() {
   testWidgets(
     'native UI: credentials, country, authorization retry, callback, import, sync and revoke',
     (tester) async {
-      final now = DateTime.now().toUtc();
+      final now = DateTime.utc(2032, 3, 28, 12);
       final sandbox = _Sandbox(now);
       final links = _Links();
       final client = MockClient(sandbox.respond);
       const store = EnableBankingCredentialsStore();
-      final databaseName = 'banking_ui_qa_${now.microsecondsSinceEpoch}.db';
+      final databaseName =
+          'banking_ui_qa_${DateTime.now().microsecondsSinceEpoch}.db';
       final database = SossoldiDatabase(dbName: databaseName);
       final preferences = await SharedPreferences.getInstance();
       await preferences.setBool('onboarding_completed', true);
       await store.clear();
       await const SecurePendingBankAuthorizationStore().clear();
+      const journal = SecureBankSessionRecoveryStore();
+      for (final record in await journal.read()) {
+        if (record.applicationId == 'qa-app') {
+          await journal.removeIfCurrent(record);
+        }
+      }
+      final journalProbe = BankSessionRecoveryRecord(
+        providerId: 'enable_banking',
+        applicationId: 'qa-app',
+        authorizationId: 'qa-journal-probe',
+        phase: BankSessionRecoveryPhase.outcomeUnknown,
+        updatedAt: now,
+      );
+      expect(await journal.upsert(journalProbe), isTrue);
+      expect(
+        (await journal.read()).any(
+          (record) => record.sameAttempt(journalProbe),
+        ),
+        isTrue,
+      );
+      expect(await journal.removeIfCurrent(journalProbe), isTrue);
       final api = EnableBankingApi(
-        auth: EnableBankingAuth(),
+        auth: EnableBankingAuth(now: () => now),
         store: store,
         client: client,
       );
       final container = ProviderContainer(
         overrides: [
           databaseProvider.overrideWithValue(database),
+          bankingClockProvider.overrideWithValue(() => now),
           sharedPrefProvider.overrideWithValue(preferences),
           enableBankingApiProvider.overrideWithValue(api),
           if (!nativeCallback)
@@ -214,11 +259,12 @@ void main() {
               BankDeeplinkService(source: links),
             ),
           bankConsentLifecycleServiceProvider.overrideWith(
-            (ref) => _ConsentLauncher(ref, now),
+            (ref) => _ConsentLauncher(ref, now, store, api),
           ),
           bankSyncServiceProvider.overrideWith(
             (ref) => BankSyncService(
               accountData: ref.read(bankAccountDataSourceProvider),
+              consent: ref.read(bankConsentServiceProvider),
               institutions: ref.read(bankInstitutionDirectoryProvider),
               providerId: 'enable_banking',
               repository: ref.read(bankSyncRepositoryProvider),
@@ -236,6 +282,17 @@ void main() {
         await links.controller.close();
         await store.clear();
         await const SecurePendingBankAuthorizationStore().clear();
+        for (final record in await journal.read()) {
+          if (record.applicationId == 'qa-app') {
+            await journal.removeIfCurrent(record);
+          }
+        }
+        expect(
+          (await journal.read()).where(
+            (record) => record.applicationId == 'qa-app',
+          ),
+          isEmpty,
+        );
         await database.close();
         await sqlite.deleteDatabase(
           '${await sqlite.getDatabasesPath()}/$databaseName',
@@ -334,7 +391,9 @@ void main() {
       await until(find.text('QA Bank'));
       await tap(find.text('QA Bank'));
       await until(
-        find.text('Could not open the browser. Tap the bank to retry.'),
+        find.text(
+          'Could not open the browser. Try again to resume the same authorization.',
+        ),
       );
       final first = await container
           .read(pendingBankAuthorizationStoreProvider)
@@ -343,7 +402,12 @@ void main() {
       (container.read(bankConsentLifecycleServiceProvider) as _ConsentLauncher)
               .browserOpens =
           true;
-      await tap(find.text('QA Bank'));
+      await tap(find.text('Try again').last);
+      final launcher =
+          container.read(bankConsentLifecycleServiceProvider)
+              as _ConsentLauncher;
+      expect(launcher.launchCalls, 2);
+      expect(launcher.launchedUrls.toSet(), hasLength(1));
       expect(sandbox.authCalls, 1);
       final pending = await container
           .read(pendingBankAuthorizationStoreProvider)
@@ -410,7 +474,9 @@ void main() {
       await until(find.text('Bank accounts are up to date'));
       expect(await db.query('transaction'), hasLength(1));
       await tap(find.byIcon(Icons.link_off));
-      await tap(find.text('Disconnect').last);
+      await tap(find.text('Disconnect and revoke').last);
+      await until(find.text('Bank disconnected. Remote access is closed.'));
+      await tap(find.text('Dismiss'));
       await until(find.text('No banks linked yet'));
       Navigator.of(tester.element(find.text('No banks linked yet'))).pop();
       await tester.pumpAndSettle();

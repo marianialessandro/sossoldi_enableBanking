@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -11,18 +13,41 @@ import 'package:sossoldi/providers/banking_ui_provider.dart';
 import 'package:sossoldi/services/banking/banking_account_import_result.dart';
 import 'package:sossoldi/services/banking/banking_exception.dart';
 import 'package:sossoldi/services/banking/lifecycle/bank_authorization_callback.dart';
+import 'package:sossoldi/services/banking/lifecycle/bank_authorization_coordinator.dart';
+import 'package:sossoldi/services/banking/lifecycle/pending_bank_authorization.dart';
+import 'package:sossoldi/services/banking/lifecycle/pending_bank_authorization_store.dart';
 import 'package:sossoldi/ui/theme/app_theme.dart';
 import '../helpers/banking_recovery_harness.dart';
+import '../support/banking_recovery_actions_contract.dart'
+    show pumpRecoveryUntil;
 
-Future<void> until(WidgetTester tester, bool Function() ready) async {
-  for (var i = 0; i < 200 && !ready(); i++) {
-    await tester.runAsync(
-      () => Future<void>.delayed(const Duration(milliseconds: 1)),
-    );
-    await tester.pump(const Duration(milliseconds: 20));
+Future<void> until(WidgetTester tester, bool Function() ready) =>
+    pumpRecoveryUntil(tester, ready);
+
+class _ImportRefreshBarrier extends PendingBankAuthorizationStore
+    implements BankAuthorizationScope {
+  final base = const SecurePendingBankAuthorizationStore();
+  bool holdNextRead = false;
+  final entered = Completer<void>();
+  final release = Completer<void>();
+  @override
+  Object get authorizationScope => base.authorizationScope;
+  @override
+  Future<PendingBankAuthorization?> read() async {
+    final hold = holdNextRead;
+    holdNextRead = false;
+    final value = await base.read();
+    if (hold) {
+      entered.complete();
+      await release.future;
+    }
+    return value;
   }
-  expect(ready(), isTrue);
-  await tester.pumpAndSettle();
+
+  @override
+  Future<void> save(PendingBankAuthorization value) => base.save(value);
+  @override
+  Future<void> clear() => base.clear();
 }
 
 void main() {
@@ -264,15 +289,21 @@ void main() {
       'CONTINUE IMPORT $cancel sends no account requests and allows fresh retry',
       (tester) async {
         final h = BankingRecoveryHarness();
+        final refresh = _ImportRefreshBarrier();
         late Widget card;
         await tester.runAsync(() async {
-          await h.initialize(bootstrap: false);
+          await h.initialize(bootstrap: false, pendingStore: refresh);
           await h.configure('A');
           final staged = await h.stage();
           h.requiredHeaders = ['Psu-Ip-Address'];
           card = ConnectionCard(connection: staged);
         });
-        addTearDown(() => tester.runAsync(h.dispose));
+        addTearDown(() async {
+          if (!refresh.release.isCompleted) {
+            refresh.release.complete();
+          }
+          await tester.runAsync(h.dispose);
+        });
         await tester.pumpWidget(
           UncontrolledProviderScope(
             container: h.container,
@@ -287,6 +318,7 @@ void main() {
           tester,
           () => find.byType(BankSyncContextDialog).evaluate().isNotEmpty,
         );
+        refresh.holdNextRead = true;
         if (cancel == 'Cancel') {
           await tester.tap(find.text('Cancel'));
         } else if (cancel == 'back') {
@@ -298,11 +330,23 @@ void main() {
           tester,
           () =>
               h.container.read(connectBankFlowProvider).importStatus ==
-              BankingImportStatus.cancelled,
+                  BankingImportStatus.cancelled &&
+              refresh.entered.isCompleted,
         );
+        final continueImport = find.widgetWithText(
+          TextButton,
+          'CONTINUE IMPORT',
+        );
+        expect(tester.widget<TextButton>(continueImport).onPressed, isNull);
         expect(h.accountCalls, isEmpty);
         expect(h.balanceCalls, isEmpty);
+        expect(h.contexts, isEmpty);
         h.requiredHeaders = ['Psu-User-Agent'];
+        refresh.release.complete();
+        await until(
+          tester,
+          () => tester.widget<TextButton>(continueImport).onPressed != null,
+        );
         await tester.tap(find.text('CONTINUE IMPORT'));
         await until(
           tester,

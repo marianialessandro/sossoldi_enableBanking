@@ -13,6 +13,7 @@ import '../services/banking/banking_balance.dart';
 import '../services/banking/banking_exception.dart';
 import '../services/banking/banking_reference.dart';
 import '../services/banking/lifecycle/bank_authorization_result.dart';
+import '../services/banking/lifecycle/pending_bank_authorization.dart';
 import '../services/banking/lifecycle/bank_session_recovery_store.dart';
 import '../services/banking/lifecycle/banking_platform_support.dart';
 import '../services/banking/sync/bank_sync_lifecycle.dart';
@@ -187,6 +188,7 @@ class BankRecoveryIssue extends _$BankRecoveryIssue {
   String? _importIssue;
   final List<BankConnection?> _importConnections = [];
   String? _syncIssue;
+  String? _pendingCleanupIssue;
   @override
   String? build() => null;
   void report(Object error) => reportMessage(bankingErrorMessage(error));
@@ -205,12 +207,18 @@ class BankRecoveryIssue extends _$BankRecoveryIssue {
     _publish();
   }
 
+  void reportPendingCleanup(String? message) {
+    _pendingCleanupIssue = message;
+    _publish();
+  }
+
   void _publish() {
     final messages = [
       _recoveryIssue,
       _callbackIssue,
       _importIssue,
       _syncIssue,
+      _pendingCleanupIssue,
     ].nonNulls.toSet();
     state = messages.isEmpty ? null : messages.join('\n');
   }
@@ -259,11 +267,48 @@ class BankAccountImportSelection {
   });
 }
 
+enum BankRecoveryActionKind { cancel, revoke, local, resume }
+
+enum BankRecoveryActionStatus { running, applied, stale, failed }
+
+class BankRecoveryActionResult {
+  final BankRecoveryActionKind kind;
+  final BankRecoveryActionStatus status;
+  final String message;
+  final BankConnection? connection;
+  final BankAuthorizationOwner? authorizationOwner;
+  final PendingBankAuthorization? pendingCleanup;
+  const BankRecoveryActionResult({
+    required this.kind,
+    required this.status,
+    required this.message,
+    this.connection,
+    this.authorizationOwner,
+    this.pendingCleanup,
+  });
+  bool get applied => status == BankRecoveryActionStatus.applied;
+  bool concerns(BankConnection value) =>
+      connection?.copy(status: value.status).sameLifecycle(value) == true;
+}
+
+const bankRecoveryStaleMessage =
+    'This bank connection changed. Review its current status before trying again.';
+const bankRecoveryCredentialsMessage =
+    'Remote consent cannot be revoked with the current Enable Banking credentials. Restore the original credentials and try again, or disconnect locally.';
+
+const bankPendingCleanupMessage =
+    'Could not complete bank recovery cleanup. Try again. Other connected banks can still sync.';
+
 class ConnectBankFlowState {
   final List<BankInstitution> aspsps;
   final List<BankingAccount> importable;
   final BankConnection? connection;
   final bool authorizing;
+  final BankAuthorizationOwner? authorizationOwner;
+  final List<BankRecoveryActionResult> recoveryActions;
+  final BankRecoveryActionResult? recoveryNotice;
+  final List<BankRecoveryActionResult> recoveryNotices;
+  final PendingBankAuthorization? pendingCleanup;
   final List<BankingAccountImportOutcome> outcomes;
   final BankingImportStatus importStatus;
   final BankingImportFailureScope? failureScope;
@@ -273,10 +318,52 @@ class ConnectBankFlowState {
     this.importable = const [],
     this.connection,
     this.authorizing = false,
+    this.authorizationOwner,
+    this.recoveryActions = const [],
+    this.recoveryNotice,
+    this.recoveryNotices = const [],
+    this.pendingCleanup,
     this.outcomes = const [],
     this.importStatus = BankingImportStatus.idle,
     this.failureScope,
   });
+
+  static const _unset = Object();
+  ConnectBankFlowState copy({
+    List<BankInstitution>? aspsps,
+    bool? authorizing,
+    Object? authorizationOwner = _unset,
+    List<BankRecoveryActionResult>? recoveryActions,
+    Object? recoveryNotice = _unset,
+    List<BankRecoveryActionResult>? recoveryNotices,
+    Object? pendingCleanup = _unset,
+  }) => ConnectBankFlowState(
+    aspsps: aspsps ?? this.aspsps,
+    importable: importable,
+    connection: connection,
+    authorizing: authorizing ?? this.authorizing,
+    authorizationOwner: identical(authorizationOwner, _unset)
+        ? this.authorizationOwner
+        : authorizationOwner as BankAuthorizationOwner?,
+    recoveryActions: recoveryActions ?? this.recoveryActions,
+    recoveryNotice: identical(recoveryNotice, _unset)
+        ? this.recoveryNotice
+        : recoveryNotice as BankRecoveryActionResult?,
+    recoveryNotices: recoveryNotices ?? this.recoveryNotices,
+    pendingCleanup: identical(pendingCleanup, _unset)
+        ? this.pendingCleanup
+        : pendingCleanup as PendingBankAuthorization?,
+    outcomes: outcomes,
+    importStatus: importStatus,
+    failureScope: failureScope,
+  );
+
+  List<BankRecoveryActionResult> get visibleRecoveryNotices =>
+      recoveryNotices.isNotEmpty
+      ? recoveryNotices
+      : recoveryNotice == null
+      ? const []
+      : [recoveryNotice!];
 
   int? get connectionId => connection?.id;
   bool get loading => importStatus == BankingImportStatus.loading;
@@ -353,8 +440,116 @@ class ConnectBankFlow extends _$ConnectBankFlow {
   int _operation = 0;
   bool _interactive = false;
   bool _submitting = false;
+  BankAuthorizationOwner? _authorizationOperationOwner;
+  BankAuthorizationOwner? _cancelledAuthorizationOwner;
+  int? _authorizationStartOperation;
   @override
-  ConnectBankFlowState build() => const ConnectBankFlowState();
+  ConnectBankFlowState build() {
+    Future<void>.microtask(() async {
+      if (!ref.mounted) return;
+      try {
+        await refreshAuthorization();
+      } catch (_) {
+        /* Bootstrap owns pending recovery warnings. */
+      }
+    });
+    return const ConnectBankFlowState();
+  }
+
+  int _authorizationRefresh = 0;
+  Object? _resumeFlight;
+  Object? _cancelRecoveryFlight;
+  Future<void>? _authorizationRefreshFuture;
+
+  Future<void> refreshAuthorization() async {
+    var pending = _refreshAuthorization();
+    _authorizationRefreshFuture = pending;
+    while (true) {
+      await pending;
+      final latest = _authorizationRefreshFuture;
+      if (latest == null || identical(latest, pending)) return;
+      pending = latest;
+    }
+  }
+
+  Future<void> _refreshAuthorization() async {
+    if (!ref.mounted) return;
+    final operation = _operation;
+    final refresh = ++_authorizationRefresh;
+    final credentials = ref
+        .read(enableBankingCredentialsStoreProvider)
+        .credentialRevision;
+    bool current() =>
+        ref.mounted &&
+        refresh == _authorizationRefresh &&
+        operation == _operation &&
+        credentials ==
+            ref.read(enableBankingCredentialsStoreProvider).credentialRevision;
+    try {
+      final lifecycle = ref.read(bankConsentLifecycleServiceProvider);
+      final owner = await lifecycle.captureAuthorizationOwner();
+      final cleanup =
+          owner?.pending != null &&
+          await lifecycle.isFinalizedPending(owner!.pending!);
+      if (!current()) return;
+      state = state.copy(
+        authorizationOwner: cleanup ? null : owner,
+        pendingCleanup: cleanup ? owner.pending : null,
+      );
+      ref
+          .read(bankRecoveryIssueProvider.notifier)
+          .reportPendingCleanup(cleanup ? bankPendingCleanupMessage : null);
+    } catch (_) {
+      if (current()) {
+        ref
+            .read(bankRecoveryIssueProvider.notifier)
+            .reportPendingCleanup(bankPendingCleanupMessage);
+      }
+    }
+  }
+
+  Future<bool> retryPendingCleanup([PendingBankAuthorization? expected]) async {
+    final pending = expected ?? state.pendingCleanup;
+    if (pending == null) return true;
+    final applied = await ref
+        .read(bankConsentLifecycleServiceProvider)
+        .retryPendingCleanup(pending);
+    if (ref.mounted) {
+      if (!applied) {
+        ref
+            .read(bankRecoveryIssueProvider.notifier)
+            .reportPendingCleanup(bankPendingCleanupMessage);
+      }
+      await refreshAuthorization();
+    }
+    return applied;
+  }
+
+  Future<BankAuthorizationOwner?> captureAuthorizationOwner() async {
+    await refreshAuthorization();
+    return state.authorizationOwner;
+  }
+
+  int get authorizationOperation => _operation;
+  bool isAuthorizationOperationCurrent(int expected, int credentials) =>
+      ref.mounted &&
+      expected == _operation &&
+      credentials ==
+          ref.read(enableBankingCredentialsStoreProvider).credentialRevision &&
+      (_authorizationOperationOwner == null ||
+          _cancelledAuthorizationOwner?.sameGeneration(
+                _authorizationOperationOwner!,
+              ) !=
+              true);
+
+  bool isAuthorizationResultCurrent(AuthorizationLaunchResult result) =>
+      ref.mounted &&
+      result.owner != null &&
+      _cancelledAuthorizationOwner?.sameGeneration(result.owner!) != true &&
+      state.authorizationOwner?.sameGeneration(result.owner!) == true &&
+      ref
+          .read(bankConsentLifecycleServiceProvider)
+          .isAuthorizationOwnerCurrent(result.owner!);
 
   Future<void> loadAspsps(String country) async {
     final config = await ref.read(enableBankingSettingsProvider.future);
@@ -379,25 +574,128 @@ class ConnectBankFlow extends _$ConnectBankFlow {
           ..sort(
             (a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()),
           );
-    state = ConnectBankFlowState(aspsps: sorted);
+    if (ref.mounted) state = state.copy(aspsps: sorted);
   }
 
   Future<AuthorizationLaunchResult> startConnection(
     BankInstitution institution, {
     BankConnection? reconnecting,
+    AuthorizationUrlLauncher? launcher,
   }) async {
     final operation = ++_operation;
-    state = ConnectBankFlowState(aspsps: state.aspsps, authorizing: true);
+    _cancelRecoveryFlight = null;
+    _resumeFlight = null;
+    final credentials = ref
+        .read(enableBankingCredentialsStoreProvider)
+        .credentialRevision;
+    state = state.copy(authorizing: true);
+    BankAuthorizationOwner? owner;
+    bool current() =>
+        ref.mounted &&
+        operation == _operation &&
+        owner != null &&
+        _cancelledAuthorizationOwner?.sameGeneration(owner!) != true &&
+        credentials ==
+            ref
+                .read(enableBankingCredentialsStoreProvider)
+                .credentialRevision &&
+        ref
+            .read(bankConsentLifecycleServiceProvider)
+            .isAuthorizationOwnerCurrent(owner!);
     try {
       final lifecycle = ref.read(bankConsentLifecycleServiceProvider);
       final attempt = await lifecycle.startAuthorization(
         institution,
         reconnectConnectionId: reconnecting?.id,
+        onOwner: (value) {
+          owner = value;
+          if (ref.mounted && operation == _operation) {
+            _authorizationOperationOwner = value;
+            _authorizationStartOperation = operation;
+            state = state.copy(authorizationOwner: value);
+          }
+        },
       );
-      return await lifecycle.launchAuthorization(attempt.url);
+      if (!current()) {
+        throw const ConnectBankFlowException(bankRecoveryStaleMessage);
+      }
+      owner = attempt.owner ?? owner;
+      state = state.copy(authorizationOwner: owner);
+      final result = await lifecycle.launchAuthorization(
+        attempt.url,
+        launcher: launcher,
+      );
+      if (!current()) {
+        throw const ConnectBankFlowException(bankRecoveryStaleMessage);
+      }
+      return AuthorizationLaunchResult(
+        url: result.url,
+        opened: result.opened,
+        owner: owner,
+      );
     } finally {
       if (ref.mounted && operation == _operation) {
-        state = ConnectBankFlowState(aspsps: state.aspsps);
+        state = state.copy(authorizing: false);
+        await refreshAuthorization();
+      }
+    }
+  }
+
+  Future<AuthorizationLaunchResult?> resumeAuthorization(
+    BankAuthorizationOwner expected,
+  ) async {
+    if (state.authorizing || state.pendingCleanup != null) return null;
+    final token = Object();
+    _resumeFlight = token;
+    final operation = _operation;
+    final credentials = ref
+        .read(enableBankingCredentialsStoreProvider)
+        .credentialRevision;
+    bool current() =>
+        ref.mounted &&
+        identical(_resumeFlight, token) &&
+        isAuthorizationOperationCurrent(operation, credentials) &&
+        _cancelledAuthorizationOwner?.sameGeneration(expected) != true &&
+        ref
+            .read(bankConsentLifecycleServiceProvider)
+            .isAuthorizationOwnerCurrent(expected);
+    state = state.copy(authorizing: true);
+    try {
+      final result = await ref
+          .read(bankConsentLifecycleServiceProvider)
+          .resumeAuthorization(expected);
+      if (!current()) return null;
+      if (!result.opened) {
+        _publishRecovery(
+          BankRecoveryActionResult(
+            kind: BankRecoveryActionKind.resume,
+            status: BankRecoveryActionStatus.failed,
+            message:
+                'Could not open the browser. Try again to resume the same authorization.',
+            authorizationOwner: expected,
+          ),
+          notice: true,
+        );
+      }
+      return result;
+    } catch (_) {
+      if (current()) {
+        _publishRecovery(
+          BankRecoveryActionResult(
+            kind: BankRecoveryActionKind.resume,
+            status: BankRecoveryActionStatus.failed,
+            message:
+                'Could not open the browser. Try again to resume the same authorization.',
+            authorizationOwner: expected,
+          ),
+          notice: true,
+        );
+      }
+      return null;
+    } finally {
+      if (ref.mounted && identical(_resumeFlight, token)) {
+        state = state.copy(authorizing: false);
+        await refreshAuthorization();
       }
     }
   }
@@ -420,14 +718,21 @@ class ConnectBankFlow extends _$ConnectBankFlow {
         'This bank is currently unavailable.',
       );
     }
-    final result = await startConnection(
-      matches.single,
-      reconnecting: connection,
-    );
-    if (!result.opened) {
-      throw const ConnectBankFlowException(
-        'Could not open the browser. Retry to resume the same authorization.',
-      );
+    final credentials = ref
+        .read(enableBankingCredentialsStoreProvider)
+        .credentialRevision;
+    final pending = startConnection(matches.single, reconnecting: connection);
+    final operation = _operation;
+    try {
+      final result = await pending;
+      if (!isAuthorizationOperationCurrent(operation, credentials)) return;
+      if (!result.opened) {
+        throw const ConnectBankFlowException(
+          'Could not open the browser. Retry to resume the same authorization.',
+        );
+      }
+    } catch (_) {
+      if (isAuthorizationOperationCurrent(operation, credentials)) rethrow;
     }
   }
 
@@ -472,6 +777,13 @@ class ConnectBankFlow extends _$ConnectBankFlow {
   }) {
     state = ConnectBankFlowState(
       connection: connection,
+      aspsps: state.aspsps,
+      authorizationOwner: state.authorizationOwner,
+      authorizing: state.authorizing,
+      recoveryActions: state.recoveryActions,
+      recoveryNotice: state.recoveryNotice,
+      recoveryNotices: state.recoveryNotices,
+      pendingCleanup: state.pendingCleanup,
       outcomes: List.unmodifiable(outcomes),
       importStatus: status,
       failureScope: failureScope,
@@ -794,6 +1106,7 @@ class ConnectBankFlow extends _$ConnectBankFlow {
           _importState(expected, state.outcomes, BankingImportStatus.obsolete);
         }
       }
+      await refreshAuthorization();
     }
   }
 
@@ -917,11 +1230,19 @@ class ConnectBankFlow extends _$ConnectBankFlow {
       ref
           .read(bankRecoveryIssueProvider.notifier)
           .clearImportRecovery(expected);
-      state = const ConnectBankFlowState();
+      state = ConnectBankFlowState(
+        aspsps: state.aspsps,
+        authorizationOwner: state.authorizationOwner,
+        recoveryActions: state.recoveryActions,
+        recoveryNotice: state.recoveryNotice,
+        recoveryNotices: state.recoveryNotices,
+        pendingCleanup: state.pendingCleanup,
+      );
       _refreshBankData(ref);
       return await syncConnectionId(connectionId, psuHeaders: headers);
     } finally {
       _submitting = false;
+      await refreshAuthorization();
     }
   }
 
@@ -970,28 +1291,248 @@ class ConnectBankFlow extends _$ConnectBankFlow {
     Map<String, String> psuHeaders = const {},
   }) => syncConnectionId(connection.id!, psuHeaders: psuHeaders);
 
-  Future<void> disconnect(BankConnection connection) async {
-    try {
-      await ref.read(bankConsentLifecycleServiceProvider).revoke(connection);
-      if (state.connectionId == connection.id) {
-        state = const ConnectBankFlowState();
-      }
-    } finally {
-      _refreshBankData(ref);
+  final _recoveryFlights = <int, (BankConnection, Object)>{};
+
+  void dismissRecoveryNotice([BankRecoveryActionResult? expected]) {
+    final remaining = expected == null
+        ? <BankRecoveryActionResult>[]
+        : state.visibleRecoveryNotices
+              .where((notice) => !identical(notice, expected))
+              .toList();
+    state = state.copy(
+      recoveryNotices: List.unmodifiable(remaining),
+      recoveryNotice: remaining.lastOrNull,
+    );
+  }
+
+  void _publishRecovery(
+    BankRecoveryActionResult result, {
+    bool notice = false,
+  }) {
+    if (!ref.mounted) return;
+    state = state.copy(
+      recoveryActions: List.unmodifiable([
+        ...state.recoveryActions.where(
+          (item) => result.connection != null
+              ? item.connection?.id != result.connection!.id
+              : item.kind != BankRecoveryActionKind.cancel,
+        ),
+        result,
+      ]),
+      recoveryNotice: notice ? result : state.recoveryNotice,
+      recoveryNotices: notice
+          ? List.unmodifiable([
+              ...state.visibleRecoveryNotices.where(
+                (item) => result.connection != null
+                    ? item.connection?.id != result.connection!.id
+                    : item.authorizationOwner == null ||
+                          result.authorizationOwner == null ||
+                          !item.authorizationOwner!.sameGeneration(
+                            result.authorizationOwner!,
+                          ),
+              ),
+              result,
+            ])
+          : state.recoveryNotices,
+    );
+  }
+
+  Future<BankRecoveryActionResult> disconnect(BankConnection connection) =>
+      _disconnect(connection, false);
+  Future<BankRecoveryActionResult> disconnectLocally(
+    BankConnection connection,
+  ) => _disconnect(connection, true);
+
+  Future<BankRecoveryActionResult> _disconnect(
+    BankConnection expected,
+    bool local,
+  ) async {
+    final kind = local
+        ? BankRecoveryActionKind.local
+        : BankRecoveryActionKind.revoke;
+    PendingBankAuthorization? cleanup;
+    BankRecoveryActionResult result(
+      BankRecoveryActionStatus status,
+      String message,
+    ) => BankRecoveryActionResult(
+      kind: kind,
+      status: status,
+      message: message,
+      connection: expected,
+      pendingCleanup: cleanup,
+    );
+    final active = _recoveryFlights[expected.id];
+    if (active != null && active.$1.sameLifecycle(expected)) {
+      return result(BankRecoveryActionStatus.stale, bankRecoveryStaleMessage);
     }
+    final repository = ref.read(bankConnectionRepositoryProvider);
+    final lifecycle = ref.read(bankConsentLifecycleServiceProvider);
+    final readContext = ref.read(bankAuthorizationContextReaderProvider);
+    final token = Object();
+    _recoveryFlights[expected.id!] = (expected, token);
+    bool owned() =>
+        ref.mounted && identical(_recoveryFlights[expected.id]?.$2, token);
+    _publishRecovery(
+      result(
+        BankRecoveryActionStatus.running,
+        local ? 'Disconnecting locally…' : 'Revoking bank consent…',
+      ),
+    );
+    BankRecoveryActionResult outcome;
+    var credentialFailure = false;
+    try {
+      BankDisconnectFinalization finalization;
+      if (local) {
+        finalization = await lifecycle.disconnectLocally(expected);
+      } else {
+        try {
+          final context = await readContext();
+          credentialFailure =
+              context.applicationId != expected.applicationId ||
+              context.providerId != expected.providerId;
+        } catch (_) {
+          credentialFailure = true;
+        }
+        if (credentialFailure) {
+          throw const ConnectBankFlowException(bankRecoveryCredentialsMessage);
+        }
+        finalization = await lifecycle.revoke(expected);
+      }
+      cleanup = finalization.pendingCleanup;
+      if (owned() && cleanup != null) {
+        final projection = state.authorizationOwner?.pending;
+        final ownProjection =
+            projection?.state == cleanup.state &&
+            projection?.authorizationId == cleanup.authorizationId;
+        state = state.copy(
+          pendingCleanup: cleanup,
+          authorizationOwner: ownProjection ? null : state.authorizationOwner,
+        );
+        ref
+            .read(bankRecoveryIssueProvider.notifier)
+            .reportPendingCleanup(bankPendingCleanupMessage);
+      }
+      outcome = result(
+        BankRecoveryActionStatus.applied,
+        local
+            ? 'Bank disconnected locally. Remote consent was not revoked by this action. Manage or revoke it through your bank or Enable Banking.'
+            : 'Bank disconnected. Remote access is closed.',
+      );
+      if (owned() && state.connection?.sameLifecycle(expected) == true) {
+        ++_operation;
+        _interactive = false;
+        state = ConnectBankFlowState(
+          aspsps: state.aspsps,
+          authorizationOwner: state.authorizationOwner,
+          recoveryActions: state.recoveryActions,
+          recoveryNotice: state.recoveryNotice,
+          recoveryNotices: state.recoveryNotices,
+          pendingCleanup: state.pendingCleanup,
+        );
+      }
+    } catch (error) {
+      BankConnection? latest;
+      var readable = true;
+      try {
+        latest = await repository.findById(expected.id!);
+      } catch (_) {
+        readable = false;
+      }
+      final stale =
+          readable &&
+          (latest == null ||
+              !expected.copy(status: latest.status).sameLifecycle(latest));
+      outcome = result(
+        stale
+            ? BankRecoveryActionStatus.stale
+            : BankRecoveryActionStatus.failed,
+        stale
+            ? bankRecoveryStaleMessage
+            : local
+            ? 'Could not disconnect the bank locally. Your connection has not been removed. Try again.'
+            : credentialFailure
+            ? bankRecoveryCredentialsMessage
+            : 'Could not confirm that bank consent was revoked. Try again, or disconnect locally. Remote consent may still be active.',
+      );
+    }
+    if (owned()) {
+      _recoveryFlights.remove(expected.id);
+      _publishRecovery(
+        outcome,
+        notice:
+            outcome.applied || outcome.status == BankRecoveryActionStatus.stale,
+      );
+      _refreshBankData(ref);
+      await refreshAuthorization();
+    }
+    return outcome;
   }
 
-  Future<void> disconnectLocally(BankConnection connection) async {
-    await ref
-        .read(bankConsentLifecycleServiceProvider)
-        .disconnectLocally(connection);
-    _refreshBankData(ref);
-  }
-
-  Future<void> cancelAuthorization() {
-    ++_operation;
-    _interactive = false;
-    return ref.read(bankConsentLifecycleServiceProvider).cancelAuthorization();
+  Future<BankRecoveryActionResult> cancelAuthorization([
+    BankAuthorizationOwner? expected,
+  ]) async {
+    final lifecycle = ref.read(bankConsentLifecycleServiceProvider);
+    if (expected == null) {
+      // Preserve the unconditional import/credential-clear contract for existing callers.
+      ++_operation;
+      _interactive = false;
+      _cancelledAuthorizationOwner = _authorizationOperationOwner;
+      await lifecycle.cancelAuthorization();
+      await refreshAuthorization();
+      return const BankRecoveryActionResult(
+        kind: BankRecoveryActionKind.cancel,
+        status: BankRecoveryActionStatus.applied,
+        message: 'Connection attempt cancelled. You can choose another bank.',
+      );
+    }
+    final owner = expected;
+    if (lifecycle.isAuthorizationOwnerCurrent(owner)) {
+      _cancelledAuthorizationOwner = owner;
+      _resumeFlight = null;
+      state = state.copy(authorizing: false);
+    }
+    final token = Object();
+    _cancelRecoveryFlight = token;
+    BankRecoveryActionResult result(
+      BankRecoveryActionStatus status,
+      String message,
+    ) => BankRecoveryActionResult(
+      kind: BankRecoveryActionKind.cancel,
+      status: status,
+      message: message,
+      authorizationOwner: owner,
+    );
+    var outcome = result(
+      BankRecoveryActionStatus.stale,
+      bankRecoveryStaleMessage,
+    );
+    try {
+      if (await lifecycle.cancelAuthorizationIfCurrent(owner)) {
+        if (ref.mounted &&
+            _operation == _authorizationStartOperation &&
+            _authorizationOperationOwner?.sameGeneration(owner) == true) {
+          ++_operation;
+        }
+        if (ref.mounted &&
+            state.authorizationOwner?.sameGeneration(owner) == true) {
+          state = state.copy(authorizing: false, authorizationOwner: null);
+        }
+        outcome = result(
+          BankRecoveryActionStatus.applied,
+          'Connection attempt cancelled. You can choose another bank.',
+        );
+      }
+    } catch (_) {
+      outcome = result(
+        BankRecoveryActionStatus.failed,
+        'Could not cancel the connection attempt. Try again before starting another connection.',
+      );
+    }
+    if (ref.mounted && identical(_cancelRecoveryFlight, token)) {
+      _publishRecovery(outcome, notice: true);
+    }
+    await refreshAuthorization();
+    return outcome;
   }
 }
 
