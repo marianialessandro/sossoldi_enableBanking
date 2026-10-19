@@ -1,12 +1,14 @@
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:sossoldi/model/bank_account.dart';
 import 'package:sossoldi/model/bank_connection.dart';
 import 'package:sossoldi/services/banking/bank_authorization_context.dart';
 import 'package:sossoldi/services/banking/bank_consent_service.dart';
 import 'package:sossoldi/services/banking/bank_institution.dart';
 import 'package:sossoldi/services/banking/bank_institution_directory.dart';
 import 'package:sossoldi/services/banking/banking_authorization.dart';
+import 'package:sossoldi/services/banking/banking_account.dart';
 import 'package:sossoldi/services/banking/banking_connection.dart';
 import 'package:sossoldi/services/banking/banking_exception.dart';
 import 'package:sossoldi/services/banking/banking_reference.dart';
@@ -18,6 +20,7 @@ import 'package:sossoldi/services/banking/lifecycle/pending_bank_authorization.d
 import 'package:sossoldi/services/banking/lifecycle/pending_bank_authorization_store.dart';
 import 'package:sossoldi/services/database/migration_manager.dart';
 import 'package:sossoldi/services/database/repositories/bank_connection_repository.dart';
+import 'package:sossoldi/services/database/repositories/bank_reconciliation_exception.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 class _MemoryPendingStore implements PendingBankAuthorizationStore {
@@ -635,6 +638,105 @@ void main() {
     },
   );
 
+  for (final selectionState in ['valid', 'expired', 'revoking', 'stale']) {
+    test('A14 A15 A29 actual selection snapshot $selectionState', () async {
+      var staged = await stageForRecovery();
+      if (selectionState == 'expired') {
+        await db.update(
+          bankConnectionTable,
+          {BankConnectionFields.pendingValidUntil: now.toIso8601String()},
+          where: 'id = ?',
+          whereArgs: [staged.id],
+        );
+        staged = await repository.selectById(staged.id!);
+      } else if (selectionState == 'revoking') {
+        staged = (await repository.markStatusIfCurrent(
+          staged,
+          BankConnectionStatus.revocationPending,
+          clock: () => now,
+        ))!;
+      } else if (selectionState == 'stale') {
+        await db.update(
+          bankConnectionTable,
+          {
+            BankConnectionFields.pendingRemoteConnectionId: 'replacement',
+            BankConnectionFields.pendingAuthorizationId: 'replacement-auth',
+          },
+          where: 'id = ?',
+          whereArgs: [staged.id],
+        );
+      }
+      final before = await db.query(bankConnectionTable);
+      final savedPending = pending.value;
+      final result = service().activateConnection(staged.id!, [
+        (
+          remote: BankingAccount(
+            reference: BankingAccountReference(
+              providerId: 'alternative',
+              remoteId: 'uid',
+              identityKeys: {'hash'},
+            ),
+            currency: 'EUR',
+          ),
+          newAccount: const BankAccount(
+            name: 'Selected',
+            symbol: 'wallet',
+            color: 1,
+            startingValue: 0,
+            active: true,
+            countNetWorth: true,
+            mainAccount: false,
+            order: 0,
+          ),
+        ),
+      ], expectedStaging: staged);
+      if (selectionState == 'valid') {
+        expect((await result).status, BankConnectionStatus.active);
+        expect(
+          (await db.query(bankAccountTable)).single['ebAccountUid'],
+          'uid',
+        );
+        expect(await db.query('bankAccountIdentity'), hasLength(1));
+        expect(pending.value, isNull);
+      } else {
+        await expectLater(result, throwsA(isA<BankReconciliationException>()));
+        expect(await db.query(bankConnectionTable), before);
+        expect(await db.query(bankAccountTable), isEmpty);
+        expect(await db.query('bankAccountIdentity'), isEmpty);
+        expect(pending.value, savedPending);
+      }
+    });
+  }
+
+  for (final terminal in [
+    BankingConnectionStatus.closed,
+    BankingConnectionStatus.revoked,
+  ]) {
+    test(
+      'A20 A31 terminal staged ${terminal.name} cannot import or resume',
+      () async {
+        final staged = await stageForRecovery();
+        api.sessionStatus = terminal;
+        expect(await service().resumeAwaitingImports(), isEmpty);
+        final stored = await repository.selectById(staged.id!);
+        expect(
+          stored.status,
+          anyOf(
+            BankConnectionStatus.reauthRequired,
+            BankConnectionStatus.revoked,
+          ),
+        );
+        expect(stored.pendingRemoteConnectionId, isNull);
+        expect(stored.pendingAuthorizationId, isNull);
+        expect(stored.pendingValidUntil, isNull);
+        expect(pending.value, isNull);
+        expect(await db.query(bankAccountTable), isEmpty);
+        expect(await service().resumeAwaitingImports(), isEmpty);
+        expect(api.createCalls, 1);
+      },
+    );
+  }
+
   test('A09 two lifecycle instances share one start and state', () async {
     api.entered = Completer<void>();
     api.startGate = Completer<void>();
@@ -1099,9 +1201,47 @@ void main() {
     expect(api.startCalls, 0);
   });
 
+  for (final offset in [-1, 0, 1]) {
+    test('CAL callback before at after pending expiry $offset', () async {
+      await service().startAuthorization(bank());
+      final original = pending.value!;
+      pending.value = PendingBankAuthorization.fromJson({
+        ...original.toJson(),
+        'expires_at': now
+            .subtract(Duration(microseconds: offset))
+            .toIso8601String(),
+      });
+      final callback = BankAuthorizationCallback(
+        code: 'synthetic-code',
+        state: original.state,
+      );
+      if (offset < 0) {
+        final result = await service().completeCallback(callback);
+        expect(result.connection.pendingRemoteConnectionId, isNotNull);
+        expect(api.createCalls, 1);
+        expect(await repository.selectAwaitingImport(), hasLength(1));
+      } else {
+        await expectLater(
+          service().completeCallback(callback),
+          throwsA(
+            isA<BankingException>().having(
+              (error) => error.failure,
+              'expiry at the shared UTC clock',
+              BankingFailure.connectionExpired,
+            ),
+          ),
+        );
+        expect(api.createCalls, 0);
+        expect(await repository.selectAll(), isEmpty);
+        expect(pending.value, isNull);
+      }
+    });
+  }
+
   test('expired and mismatched callbacks never exchange the code', () async {
     await service().startAuthorization(api.aspsps.single);
     final state = pending.value!.state;
+    final original = pending.value;
 
     await expectLater(
       () => service().completeCallback(
@@ -1110,6 +1250,7 @@ void main() {
       throwsA(isA<BankingException>()),
     );
     expect(api.createCalls, 0);
+    expect(pending.value, same(original));
     pending.value = PendingBankAuthorization(
       providerId: 'alternative',
       state: state,

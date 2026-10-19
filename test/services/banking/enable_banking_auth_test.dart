@@ -271,7 +271,7 @@ void main() {
 
     test('reuses the cached token within the refresh margin', () async {
       final store = await storeWithCredentials();
-      var now = DateTime(2026);
+      var now = DateTime.utc(2026);
       final auth = EnableBankingAuth(
         tokenTtl: const Duration(hours: 1),
         refreshMargin: const Duration(minutes: 5),
@@ -288,7 +288,7 @@ void main() {
 
     test('signs a fresh token once inside the refresh margin', () async {
       final store = await storeWithCredentials();
-      var now = DateTime(2026);
+      var now = DateTime.utc(2026);
       final auth = EnableBankingAuth(
         tokenTtl: const Duration(hours: 1),
         refreshMargin: const Duration(minutes: 5),
@@ -301,6 +301,26 @@ void main() {
 
       expect(store.readConfigCalls, 2);
     });
+
+    for (final offset in [-1, 0, 1]) {
+      test('CAL token refresh margin before at after $offset', () async {
+        final store = await storeWithCredentials();
+        final issued = DateTime.utc(2032, 12, 31, 23, 30);
+        var now = issued;
+        const ttl = Duration(hours: 1);
+        const margin = Duration(minutes: 5);
+        final auth = EnableBankingAuth(
+          tokenTtl: ttl,
+          refreshMargin: margin,
+          now: () => now,
+        );
+        await auth.getValidToken(store);
+        expect(store.readConfigCalls, 1);
+        now = issued.add(ttl - margin).add(Duration(microseconds: offset));
+        await auth.getValidToken(store);
+        expect(store.readConfigCalls, offset < 0 ? 1 : 2);
+      });
+    }
 
     test(
       'clearCache forces credentials to be read again after rotation',
