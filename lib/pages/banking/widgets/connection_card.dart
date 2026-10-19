@@ -13,6 +13,7 @@ import '../../../ui/widgets/default_card.dart';
 import '../../../ui/widgets/rounded_icon.dart';
 import 'confirm_disconnect_dialog.dart';
 import 'bank_sync_context_dialog.dart';
+import '../banking_import_context.dart';
 
 /// One linked bank: how many accounts it feeds, until when the consent is valid and the actions available on it.
 class ConnectionCard extends ConsumerStatefulWidget {
@@ -27,6 +28,17 @@ class ConnectionCard extends ConsumerStatefulWidget {
 class _ConnectionCardState extends ConsumerState<ConnectionCard> {
   bool _syncing = false;
   bool _disconnecting = false;
+  bool _resuming = false;
+
+  Future<void> _resume() async {
+    if (_resuming) return;
+    setState(() => _resuming = true);
+    try {
+      await resumeBankImport(context, ref, connectionId: connection.id);
+    } finally {
+      if (mounted) setState(() => _resuming = false);
+    }
+  }
 
   BankConnection get connection => widget.connection;
 
@@ -109,7 +121,9 @@ class _ConnectionCardState extends ConsumerState<ConnectionCard> {
         connection.status == BankConnectionStatus.expired ||
         connection.status == BankConnectionStatus.reauthRequired ||
         (connection.validUntil != null &&
-            !connection.validUntil!.isAfter(DateTime.now().toUtc()));
+            !connection.validUntil!.isAfter(
+              ref.read(bankingClockProvider)().toUtc(),
+            ));
 
     return DefaultCard(
       onTap: null,
@@ -179,9 +193,7 @@ class _ConnectionCardState extends ConsumerState<ConnectionCard> {
           const Divider(height: 1, color: grey2),
           if (connection.pendingRemoteConnectionId != null)
             TextButton(
-              onPressed: () => ref
-                  .read(connectBankFlowProvider.notifier)
-                  .resumeImport(connectionId: connection.id),
+              onPressed: _resuming ? null : _resume,
               child: const Text("CONTINUE IMPORT"),
             ),
           if (isExpired)

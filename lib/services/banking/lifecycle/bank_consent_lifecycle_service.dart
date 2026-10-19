@@ -1162,11 +1162,18 @@ class BankConsentLifecycleService {
       ))?.sameLifecycle(connection) ??
       false;
 
-  Future<List<ResumableBankConnection>> resumeAwaitingImports() async {
+  Future<List<ResumableBankConnection>> resumeAwaitingImports({
+    BankConnection? expectedStaging,
+    void Function(BankConnection settled, BankingFailure? failure)? onRejected,
+  }) async {
     final revision = _coordinator.revision;
     final credentials = _credentialRevision?.call();
     final result = <ResumableBankConnection>[];
     for (final connection in await _connections.selectAwaitingImport()) {
+      if (expectedStaging != null &&
+          !connection.sameLifecycle(expectedStaging)) {
+        continue;
+      }
       if (!{
         BankConnectionStatus.awaitingImport,
         BankConnectionStatus.active,
@@ -1200,7 +1207,12 @@ class BankConsentLifecycleService {
             ? BankConnectionStatus.expired
             : _localStatus(details.status);
         if (status != BankConnectionStatus.awaitingImport) {
-          await _rejectStagedConnection(connection, status, pending);
+          final settled = await _rejectStagedConnection(
+            connection,
+            status,
+            pending,
+          );
+          if (settled != null) onRejected?.call(settled, null);
           continue;
         }
         if (await _snapshotCurrent(connection)) {
@@ -1215,13 +1227,18 @@ class BankConsentLifecycleService {
         }
         final status = _statusForFailure(error.failure);
         if (status == null) rethrow;
-        await _rejectStagedConnection(connection, status, pending);
+        final settled = await _rejectStagedConnection(
+          connection,
+          status,
+          pending,
+        );
+        if (settled != null) onRejected?.call(settled, error.failure);
       }
     }
     return result;
   }
 
-  Future<void> _rejectStagedConnection(
+  Future<BankConnection?> _rejectStagedConnection(
     BankConnection connection,
     BankConnectionStatus failedStatus,
     PendingBankAuthorization? pending,
@@ -1243,6 +1260,7 @@ class BankConsentLifecycleService {
         _pendingOwns(pending, connection)) {
       await _clearOwnedPending(pending);
     }
+    return changed;
   }
 
   Future<BankConnectionStatus> refreshConnectionState(

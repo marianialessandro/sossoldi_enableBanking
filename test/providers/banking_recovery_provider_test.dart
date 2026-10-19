@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:sossoldi/providers/banking_ui_provider.dart';
+import 'package:sossoldi/services/banking/banking_account_import_result.dart';
 import 'package:sossoldi/services/banking/lifecycle/bank_session_recovery_store.dart';
 
 import '../helpers/banking_recovery_harness.dart';
@@ -116,8 +117,17 @@ void main() {
       await flow.resumeImport();
       expect(
         harness.container.read(connectBankFlowProvider).connectionId,
-        isNull,
+        staged.id,
       );
+      expect(
+        harness.container.read(connectBankFlowProvider).importStatus,
+        BankingImportStatus.pending,
+      );
+      expect(
+        harness.container.read(connectBankFlowProvider).canImport,
+        isFalse,
+      );
+      expect(harness.accountCalls, isEmpty);
       expect(
         (await harness.repository.selectById(staged.id!)).sameLifecycle(staged),
         isTrue,

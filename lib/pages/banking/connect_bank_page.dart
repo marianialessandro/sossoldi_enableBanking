@@ -8,6 +8,7 @@ import '../../ui/widgets/rounded_icon.dart';
 import 'widgets/aspsp_selector.dart';
 import 'widgets/connection_card.dart';
 import 'widgets/country_selector.dart';
+import 'banking_import_context.dart';
 
 /// Banking hub: the banks already linked, plus the entry point of the country → bank → consent flow.
 class ConnectBankPage extends ConsumerStatefulWidget {
@@ -92,8 +93,12 @@ class _ConnectBankPageState extends ConsumerState<ConnectBankPage> {
                     children: [
                       Text(recoveryIssue),
                       TextButton(
-                        onPressed: () =>
-                            ref.invalidate(bankingUiBootstrapProvider),
+                        onPressed: () async {
+                          await resumeBankImport(context, ref);
+                          if (mounted) {
+                            ref.invalidate(bankingUiBootstrapProvider);
+                          }
+                        },
                         child: const Text('Try again'),
                       ),
                     ],

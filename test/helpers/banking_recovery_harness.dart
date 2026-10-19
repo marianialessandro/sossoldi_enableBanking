@@ -11,6 +11,7 @@ import 'package:sossoldi/providers/accounts_provider.dart';
 import 'package:sossoldi/providers/banking_ui_provider.dart';
 import 'package:sossoldi/services/banking/bank_account_data_source.dart';
 import 'package:sossoldi/services/banking/banking_account.dart';
+import 'package:sossoldi/services/banking/banking_balance.dart';
 import 'package:sossoldi/services/banking/banking_reference.dart';
 import 'package:sossoldi/services/banking/banking_request_context.dart';
 import 'package:sossoldi/services/banking/enable_banking/enable_banking_api.dart';
@@ -54,17 +55,38 @@ class _Data implements BankAccountDataSource {
     BankingAccountReference reference, {
     BankingRequestContext context = const BankingRequestContext(),
   }) async {
+    harness.accountCalls.add(reference.remoteId);
+    harness.contexts.add(Map.of(context.psuHeaders));
     final gate = harness.accountGate;
     if (harness.accountEntered != null &&
         !harness.accountEntered!.isCompleted) {
       harness.accountEntered!.complete();
     }
     await gate?.future;
+    final failure = harness.accountFailures[reference.remoteId];
+    if (failure != null) throw failure;
     return BankingAccount(
       reference: reference,
       name: 'Checking',
       currency: 'EUR',
     );
+  }
+
+  @override
+  Future<List<BankingBalance>> getBalances(
+    BankingAccountReference reference, {
+    BankingRequestContext context = const BankingRequestContext(),
+  }) async {
+    harness.balanceCalls.add(reference.remoteId);
+    harness.contexts.add(Map.of(context.psuHeaders));
+    if (harness.balanceEntered != null &&
+        !harness.balanceEntered!.isCompleted) {
+      harness.balanceEntered!.complete();
+    }
+    await harness.balanceGate?.future;
+    final failure = harness.balanceFailures[reference.remoteId];
+    if (failure != null) throw failure;
+    return [];
   }
 
   @override
@@ -93,6 +115,7 @@ class _Sync implements BankSyncService {
     BankSyncRequest request = const BankSyncRequest(),
   }) async {
     harness.syncCalls++;
+    harness.syncRequests.add(request);
     return BankSyncSummary([]);
   }
 
@@ -101,7 +124,7 @@ class _Sync implements BankSyncService {
 }
 
 class BankingRecoveryHarness {
-  final now = DateTime.utc(2032, 3, 28, 12);
+  DateTime now = DateTime.utc(2032, 3, 28, 12);
   final store = const EnableBankingCredentialsStore();
   final pending = const SecurePendingBankAuthorizationStore();
   final journal = const SecureBankSessionRecoveryStore();
@@ -116,6 +139,23 @@ class BankingRecoveryHarness {
   int deletes = 0;
   int posts = 0;
   int syncCalls = 0;
+  final accountCalls = <String>[];
+  final balanceCalls = <String>[];
+  final contexts = <Map<String, String>>[];
+  final syncRequests = <BankSyncRequest>[];
+  final accountFailures = <String, Object>{};
+  final balanceFailures = <String, Object>{};
+  List<String> requiredHeaders = [];
+  List<String> remoteUids = ['uid'];
+  List<Map<String, Object?>>? remoteAccountsData;
+  bool sessionOffline = false;
+  bool discoveryOffline = false;
+  final sessionFailures = <String, int>{};
+  final sessionCalls = <String>[];
+  Completer<void>? discoveryEntered;
+  Completer<void>? discoveryGate;
+  Completer<void>? balanceEntered;
+  Completer<void>? balanceGate;
   Completer<void>? deleteEntered;
   Completer<void>? deleteGate;
   Completer<void>? accountEntered;
@@ -123,7 +163,10 @@ class BankingRecoveryHarness {
   Completer<void>? localEntered;
   Completer<void>? localGate;
 
-  Future<void> initialize() async {
+  Future<void> initialize({
+    BankSyncService? syncService,
+    bool bootstrap = true,
+  }) async {
     FlutterSecureStorage.setMockInitialValues({});
     sqfliteFfiInit();
     final manager = MigrationManager();
@@ -165,6 +208,32 @@ class BankingRecoveryHarness {
             verifyFails ? 401 : 200,
           );
         }
+        if (request.url.path == '/aspsps') {
+          if (discoveryOffline) return http.Response('{}', 503);
+          if (discoveryEntered != null && !discoveryEntered!.isCompleted) {
+            discoveryEntered!.complete();
+          }
+          await discoveryGate?.future;
+          return http.Response(
+            jsonEncode({
+              'aspsps': [
+                {
+                  'name': 'Test Bank',
+                  'country': 'IT',
+                  'psu_types': ['personal'],
+                  'required_psu_headers': requiredHeaders,
+                },
+              ],
+            }),
+            200,
+          );
+        }
+        if (request.url.path.startsWith('/sessions/')) {
+          sessionCalls.add(request.url.path);
+        }
+        if (sessionOffline || sessionFailures.containsKey(request.url.path)) {
+          return http.Response('{}', sessionFailures[request.url.path] ?? 503);
+        }
         return http.Response(
           jsonEncode({
             'status': remoteStatus,
@@ -176,10 +245,13 @@ class BankingRecoveryHarness {
                   .toIso8601String(),
             },
             'created': now.toIso8601String(),
-            'accounts': ['uid'],
-            'accounts_data': [
-              {'uid': 'uid', 'identification_hash': 'hash'},
-            ],
+            'accounts': remoteUids,
+            'accounts_data':
+                remoteAccountsData ??
+                [
+                  for (final uid in remoteUids)
+                    {'uid': uid, 'identification_hash': 'hash-$uid'},
+                ],
           }),
           200,
         );
@@ -187,6 +259,7 @@ class BankingRecoveryHarness {
     );
     container = ProviderContainer(
       overrides: [
+        if (!bootstrap) bankingUiBootstrapProvider.overrideWith((ref) async {}),
         enableBankingCredentialsStoreProvider.overrideWithValue(store),
         enableBankingApiProvider.overrideWithValue(api),
         bankConnectionRepositoryProvider.overrideWithValue(repository),
@@ -196,7 +269,7 @@ class BankingRecoveryHarness {
         ),
         bankAccountDataSourceProvider.overrideWithValue(_Data(this)),
         accountsProvider.overrideWith(() => _Accounts(this)),
-        bankSyncServiceProvider.overrideWithValue(_Sync(this)),
+        bankSyncServiceProvider.overrideWithValue(syncService ?? _Sync(this)),
       ],
     );
   }

@@ -6,11 +6,14 @@ import '../../constants/style.dart';
 import '../../providers/banking_ui_provider.dart';
 import '../../model/bank_connection.dart';
 import '../../services/banking/banking_account.dart';
+import '../../services/banking/banking_account_import_result.dart';
+import '../../services/banking/banking_reference.dart';
 import '../../ui/device.dart';
 import '../../ui/snack_bars/snack_bar.dart';
 import '../../ui/widgets/alert_dialog.dart';
 import '../../ui/widgets/default_container.dart';
 import 'widgets/account_import_tile.dart';
+import 'banking_import_context.dart';
 
 /// How the user wants one bank account to land in the app.
 class _ImportDraft {
@@ -94,18 +97,22 @@ class _ImportAccountsPageState extends ConsumerState<ImportAccountsPage> {
     try {
       final syncResult = await ref
           .read(connectBankFlowProvider.notifier)
-          .importAccounts([
-            for (final draft in selected)
-              BankAccountImportSelection(
-                expectedStaging: expected,
-                account: draft.account,
-                name: draft.nameController.text.trim().isEmpty
-                    ? "Account"
-                    : draft.nameController.text.trim(),
-                symbol: draft.symbol,
-                color: draft.color,
-              ),
-          ]);
+          .importAccounts(
+            [
+              for (final draft in selected)
+                BankAccountImportSelection(
+                  expectedStaging: expected,
+                  account: draft.account,
+                  name: draft.nameController.text.trim().isEmpty
+                      ? "Account"
+                      : draft.nameController.text.trim(),
+                  symbol: draft.symbol,
+                  color: draft.color,
+                ),
+            ],
+            collectContext: (headers) =>
+                collectBankImportContext(context, headers),
+          );
       if (!mounted) return;
 
       // The snack bar goes through the root messenger: this route is about to be popped, so its own context cannot show anything.
@@ -120,7 +127,7 @@ class _ImportAccountsPageState extends ConsumerState<ImportAccountsPage> {
       showErrorDialog(context, e.message);
     } catch (e) {
       if (!mounted) return;
-      showErrorDialog(context, 'Could not import the accounts');
+      showErrorDialog(context, 'Could not import the accounts. Try again.');
     } finally {
       if (mounted) setState(() => importing = false);
     }
@@ -138,7 +145,8 @@ class _ImportAccountsPageState extends ConsumerState<ImportAccountsPage> {
         _reconcile(next.importable, reset: reset);
       });
     });
-    final connection = ref.watch(connectBankFlowProvider).connection;
+    final flow = ref.watch(connectBankFlowProvider);
+    final connection = flow.connection;
     final selectedCount = drafts.where((draft) => draft.selected).length;
 
     return Scaffold(
@@ -177,7 +185,9 @@ class _ImportAccountsPageState extends ConsumerState<ImportAccountsPage> {
               borderRadius: BorderRadius.circular(Sizes.borderRadius),
             ),
             child: ElevatedButton(
-              onPressed: selectedCount == 0 || importing ? null : _import,
+              onPressed: selectedCount == 0 || importing || !flow.canImport
+                  ? null
+                  : _import,
               child: const Text("IMPORT SELECTED"),
             ),
           ),
@@ -198,7 +208,7 @@ class _ImportAccountsPageState extends ConsumerState<ImportAccountsPage> {
                   ),
                   Text(
                     "${connection?.institutionName ?? 'Bank'} · "
-                    "${bankAccountCount(drafts.length)}",
+                    "${bankAccountCount(flow.outcomes.isEmpty ? drafts.length : flow.outcomes.length)}",
                     style: Theme.of(context).textTheme.bodySmall!.copyWith(
                       color: Theme.of(context).colorScheme.primary,
                     ),
@@ -206,29 +216,207 @@ class _ImportAccountsPageState extends ConsumerState<ImportAccountsPage> {
                 ],
               ),
             ),
-            if (drafts.isEmpty)
-              Padding(
-                padding: const EdgeInsets.all(Sizes.xl),
-                child: Text(
-                  "The bank did not return any accounts. Try connecting again.",
-                  style: Theme.of(context).textTheme.bodyLarge,
+            if (flow.loading)
+              Semantics(
+                liveRegion: true,
+                child: const Padding(
+                  padding: EdgeInsets.all(Sizes.lg),
+                  child: Column(
+                    children: [
+                      CircularProgressIndicator(),
+                      Text('Loading bank accounts…'),
+                    ],
+                  ),
                 ),
               ),
-            for (final draft in drafts)
-              AccountImportTile(
-                account: draft.account,
-                selected: draft.selected,
-                nameController: draft.nameController,
-                symbol: draft.symbol,
-                color: draft.color,
-                onSelectedChanged: (value) =>
-                    setState(() => draft.selected = value),
-                onIconChanged: (icon) => setState(() => draft.symbol = icon),
-                onColorChanged: (color) => setState(() => draft.color = color),
+            if (!flow.loading &&
+                flow.importStatus != BankingImportStatus.ready &&
+                flow.importStatus != BankingImportStatus.idle)
+              DefaultContainer(
+                child: Semantics(
+                  liveRegion: true,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(_statusMessage(flow)),
+                      if (flow.importStatus == BankingImportStatus.terminal)
+                        if (flow.failureScope ==
+                                BankingImportFailureScope.application ||
+                            flow.outcomes.any(
+                              (item) =>
+                                  item.scope ==
+                                  BankingImportFailureScope.application,
+                            ))
+                          TextButton(
+                            onPressed: () => Navigator.of(
+                              context,
+                            ).pushNamed('/enable-banking-setup'),
+                            child: const Text('Bank sync settings'),
+                          )
+                        else
+                          TextButton(
+                            onPressed: connection == null
+                                ? null
+                                : () => _reconnect(connection),
+                            child: const Text('RECONNECT'),
+                          )
+                      else
+                        TextButton(
+                          onPressed: () => _retry(),
+                          child: const Text('Try again'),
+                        ),
+                      if (flow.importStatus == BankingImportStatus.terminal &&
+                          flow.failureScope == null)
+                        TextButton(
+                          onPressed: () => Navigator.of(
+                            context,
+                          ).pushNamed('/enable-banking-setup'),
+                          child: const Text('Bank sync settings'),
+                        ),
+                    ],
+                  ),
+                ),
               ),
+            if (flow.outcomes.isNotEmpty)
+              for (var index = 0; index < flow.outcomes.length; index++)
+                if (flow.importStatus != BankingImportStatus.terminal &&
+                    flow.outcomes[index].account != null)
+                  _tile(
+                    drafts.firstWhere(
+                      (draft) =>
+                          draft.account.reference ==
+                          flow.outcomes[index].account!.reference,
+                    ),
+                    flow.outcomes[index].balance,
+                    balanceUnavailable:
+                        flow.outcomes[index].code == 'balance_unavailable',
+                  )
+                else
+                  _unavailable(flow.outcomes[index], index, flow.loading)
+            else
+              for (final draft in drafts) _tile(draft, null),
           ],
         ),
       ),
     );
   }
+
+  Future<void> _retry({BankingAccountReference? reference}) => resumeBankImport(
+    context,
+    ref,
+    connectionId: expectedStaging?.id,
+    accountReference: reference,
+  );
+
+  Future<void> _reconnect(BankConnection connection) async {
+    try {
+      await ref.read(connectBankFlowProvider.notifier).reconnect(connection);
+    } catch (error) {
+      if (mounted) showErrorDialog(context, bankingErrorMessage(error));
+    }
+  }
+
+  String _statusMessage(
+    ConnectBankFlowState flow,
+  ) => switch (flow.importStatus) {
+    BankingImportStatus.empty =>
+      'No accounts returned\nThe bank did not return any accounts. Try again or check with your bank.',
+    BankingImportStatus.partial =>
+      'Some accounts could not be loaded. You can import the available accounts or retry.',
+    BankingImportStatus.cancelled =>
+      'Account loading was cancelled. Try again when you are ready.',
+    BankingImportStatus.manualContextRequired =>
+      'Additional details are required to load your accounts. Try again to continue.',
+    BankingImportStatus.unavailable => 'Not available for import',
+    BankingImportStatus.pending =>
+      'Your bank connection is not ready yet. Try again.',
+    BankingImportStatus.obsolete =>
+      'The bank connection changed. Reload the accounts before importing.',
+    BankingImportStatus.terminal =>
+      (flow.failureScope == BankingImportFailureScope.application ||
+              flow.outcomes.any(
+                (item) => item.scope == BankingImportFailureScope.application,
+              ))
+          ? 'Check your Enable Banking credentials in Bank sync settings before retrying.'
+          : 'This bank connection is no longer valid. Reconnect the bank.',
+    _ => 'No accounts could be loaded. Check your connection and try again.',
+  };
+
+  Widget _unavailable(
+    BankingAccountImportOutcome outcome,
+    int index,
+    bool loading,
+  ) {
+    final descriptor = outcome.descriptor;
+    return DefaultContainer(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            descriptor.name ?? descriptor.product ?? 'Account ${index + 1}',
+            style: Theme.of(context).textTheme.titleLarge,
+          ),
+          Text(
+            [
+              AccountImportTile.maskIban(descriptor.iban),
+              if (descriptor.currency != null) descriptor.currency!,
+            ].join(' · '),
+          ),
+          Text(
+            descriptor.reference == null
+                ? 'Not available for import'
+                : 'This account could not be loaded. Try again.',
+          ),
+          if (descriptor.reference == null)
+            const Text(
+              'The bank did not provide the details needed to import this account. Check with your bank.',
+            ),
+          if (descriptor.reference != null &&
+              outcome.scope != BankingImportFailureScope.consent &&
+              outcome.scope != BankingImportFailureScope.application)
+            TextButton(
+              onPressed: loading
+                  ? null
+                  : () => _retry(reference: descriptor.reference),
+              child: const Text('Try again'),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _tile(
+    _ImportDraft draft,
+    num? balance, {
+    bool balanceUnavailable = false,
+  }) => Column(
+    children: [
+      AccountImportTile(
+        key: ValueKey(draft.account.reference),
+        balance: AsyncData(balance),
+        account: draft.account,
+        selected: draft.selected,
+        nameController: draft.nameController,
+        symbol: draft.symbol,
+        color: draft.color,
+        onSelectedChanged: (value) => setState(() => draft.selected = value),
+        onIconChanged: (icon) => setState(() => draft.symbol = icon),
+        onColorChanged: (color) => setState(() => draft.color = color),
+      ),
+      if (balanceUnavailable)
+        DefaultContainer(
+          child: Column(
+            children: [
+              const Text('The account balance could not be loaded. Try again.'),
+              TextButton(
+                onPressed: ref.read(connectBankFlowProvider).loading
+                    ? null
+                    : () => _retry(reference: draft.account.reference),
+                child: const Text('Try again'),
+              ),
+            ],
+          ),
+        ),
+    ],
+  );
 }

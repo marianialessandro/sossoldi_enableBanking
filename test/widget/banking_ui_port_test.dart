@@ -19,18 +19,14 @@ import 'package:sossoldi/pages/banking/widgets/connection_card.dart';
 import 'package:sossoldi/pages/settings/banking/enable_banking_setup_page.dart';
 import 'package:sossoldi/providers/accounts_provider.dart';
 import 'package:sossoldi/providers/banking_ui_provider.dart';
-import 'package:sossoldi/services/banking/bank_account_data_source.dart';
 import 'package:sossoldi/services/banking/banking_account.dart';
-import 'package:sossoldi/services/banking/banking_connection.dart';
 import 'package:sossoldi/services/banking/banking_reference.dart';
-import 'package:sossoldi/services/banking/banking_request_context.dart';
 import 'package:sossoldi/services/banking/bank_institution.dart';
-import 'package:sossoldi/services/banking/lifecycle/bank_authorization_result.dart';
-import 'package:sossoldi/services/banking/lifecycle/bank_consent_lifecycle_service.dart';
 import 'package:sossoldi/services/banking/sync/bank_sync_result.dart';
 import 'package:sossoldi/services/banking/sync/bank_sync_service.dart';
 import 'package:sossoldi/services/banking/sync/bank_sync_request.dart';
 import 'package:sossoldi/ui/theme/app_theme.dart';
+import '../helpers/banking_recovery_harness.dart';
 
 final now = DateTime.utc(2032, 4, 12, 10);
 final connection = BankConnection(
@@ -104,8 +100,9 @@ class _Flow extends ConnectBankFlow {
   );
   @override
   Future<BankSyncSummary> importAccounts(
-    List<BankAccountImportSelection> selections,
-  ) async {
+    List<BankAccountImportSelection> selections, {
+    BankImportContextCollector? collectContext,
+  }) async {
     selected = selections;
     return BankSyncSummary([
       const BankSyncResult(
@@ -132,50 +129,6 @@ class _InteractiveFlow extends ConnectBankFlow {
     received = psuHeaders;
     return BankSyncSummary([]);
   }
-}
-
-class _Lifecycle implements BankConsentLifecycleService {
-  List<({BankingAccount remote, BankAccount? newAccount})>? activated;
-  int? activatedId;
-  @override
-  Future<List<ResumableBankConnection>> resumeAwaitingImports() async => [
-    ResumableBankConnection(
-      connection: connection,
-      details: BankingConnection(
-        reference: const BankingConnectionReference(
-          providerId: 'test',
-          remoteId: 'pending',
-        ),
-        institution: institution,
-        validUntil: now.add(const Duration(days: 30)),
-        status: BankingConnectionStatus.active,
-        accounts: [remoteAccount.reference],
-      ),
-    ),
-  ];
-  @override
-  Future<BankConnection> activateConnection(
-    int connectionId,
-    List<({BankingAccount remote, BankAccount? newAccount})> selections, {
-    BankConnection? expectedStaging,
-  }) async {
-    activatedId = connectionId;
-    activated = selections;
-    return connection.copy(status: BankConnectionStatus.active);
-  }
-
-  @override
-  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
-}
-
-class _Data implements BankAccountDataSource {
-  @override
-  Future<BankingAccount> getAccount(
-    BankingAccountReference reference, {
-    BankingRequestContext context = const BankingRequestContext(),
-  }) async => remoteAccount;
-  @override
-  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 class _Sync implements BankSyncService {
@@ -303,38 +256,30 @@ void main() {
   test(
     'resumes staged remote accounts and activates with a zero opening balance before sync',
     () async {
-      final lifecycle = _Lifecycle();
-      final container = ProviderContainer(
-        overrides: [
-          bankConsentLifecycleServiceProvider.overrideWithValue(lifecycle),
-          bankAccountDataSourceProvider.overrideWithValue(_Data()),
-          bankSyncServiceProvider.overrideWithValue(_Sync()),
-          accountsProvider.overrideWith(_Accounts.new),
-          bankConnectionsProvider.overrideWith(_Connections.new),
-          bankConnectionSyncStatusProvider(
-            7,
-          ).overrideWith((ref) async => BankSyncSummary([])),
-        ],
-      );
-      addTearDown(container.dispose);
+      final harness = BankingRecoveryHarness();
+      await harness.initialize(syncService: _Sync());
+      await harness.configure('A');
+      final staged = await harness.stage();
+      addTearDown(harness.dispose);
+      final container = harness.container;
       final flow = container.read(connectBankFlowProvider.notifier);
-      await flow.resumeImport(connectionId: 7);
+      await flow.resumeImport(connectionId: staged.id);
       expect(
         container.read(connectBankFlowProvider).importable.single.reference,
-        remoteAccount.reference,
+        BankingAccountReference(providerId: 'enable_banking', remoteId: 'uid'),
       );
       final summary = await flow.importAccounts([
         BankAccountImportSelection(
-          expectedStaging: connection,
-          account: remoteAccount,
+          expectedStaging: staged,
+          account: container.read(connectBankFlowProvider).importable.single,
           name: 'My account',
           symbol: 'payments',
           color: 1,
         ),
       ]);
-      expect(lifecycle.activatedId, 7);
-      expect(lifecycle.activated!.single.newAccount!.startingValue, 0);
-      expect(lifecycle.activated!.single.newAccount!.name, 'My account');
+      final imported = (await harness.db.query(bankAccountTable)).single;
+      expect(imported[BankAccountFields.startingValue], 0);
+      expect(imported[BankAccountFields.name], 'My account');
       expect(summary.status, BankSyncStatus.partial);
       expect(bankSyncMessage(summary), contains('could not be synced'));
       expect(container.read(connectBankFlowProvider).connectionId, isNull);
@@ -494,14 +439,14 @@ void main() {
   testWidgets(
     'recovered import opens once and can be resumed after back navigation',
     (tester) async {
-      final container = ProviderContainer(
-        overrides: [
-          bankingUiBootstrapProvider.overrideWith((ref) async {}),
-          bankConsentLifecycleServiceProvider.overrideWithValue(_Lifecycle()),
-          bankAccountDataSourceProvider.overrideWithValue(_Data()),
-        ],
-      );
-      addTearDown(container.dispose);
+      final harness = BankingRecoveryHarness();
+      await tester.runAsync(() async {
+        await harness.initialize();
+        await harness.configure('A');
+        await harness.stage();
+      });
+      final container = harness.container;
+      addTearDown(() => tester.runAsync(harness.dispose));
       await tester.pumpWidget(
         UncontrolledProviderScope(
           container: container,
@@ -521,15 +466,21 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await container.read(connectBankFlowProvider.notifier).resumeImport();
+      await tester.runAsync(
+        () => container.read(connectBankFlowProvider.notifier).resumeImport(),
+      );
       await tester.pumpAndSettle();
       expect(find.text('Import recovered'), findsOneWidget);
-      await container.read(connectBankFlowProvider.notifier).resumeImport();
+      await tester.runAsync(
+        () => container.read(connectBankFlowProvider.notifier).resumeImport(),
+      );
       await tester.pumpAndSettle();
       bankingNavigatorKey.currentState!.pop();
       await tester.pumpAndSettle();
       expect(find.text('Connections'), findsOneWidget);
-      await container.read(connectBankFlowProvider.notifier).resumeImport();
+      await tester.runAsync(
+        () => container.read(connectBankFlowProvider.notifier).resumeImport(),
+      );
       await tester.pumpAndSettle();
       expect(find.text('Import recovered'), findsOneWidget);
     },

@@ -7,6 +7,8 @@ import '../model/bank_account.dart';
 import '../model/bank_connection.dart';
 import '../services/banking/bank_institution.dart';
 import '../services/banking/banking_account.dart';
+import '../services/banking/banking_account_import_result.dart';
+import '../services/banking/banking_request_context.dart';
 import '../services/banking/banking_balance.dart';
 import '../services/banking/banking_exception.dart';
 import '../services/banking/banking_reference.dart';
@@ -181,23 +183,56 @@ Future<BankSyncSummary> bankConnectionSyncStatus(Ref ref, int connectionId) =>
 @Riverpod(keepAlive: true)
 class BankRecoveryIssue extends _$BankRecoveryIssue {
   String? _recoveryIssue;
+  String? _importIssue;
+  final List<BankConnection?> _importConnections = [];
   String? _syncIssue;
   @override
   String? build() => null;
   void report(Object error) => reportMessage(bankingErrorMessage(error));
   void reportMessage(String message) {
     _syncIssue = message;
-    state = _recoveryIssue ?? _syncIssue;
+    _publish();
   }
 
   void reportRecovery(String? message) {
     _recoveryIssue = message;
-    state = _recoveryIssue ?? _syncIssue;
+    _publish();
+  }
+
+  void _publish() {
+    final messages = [
+      _recoveryIssue,
+      _importIssue,
+      _syncIssue,
+    ].nonNulls.toSet();
+    state = messages.isEmpty ? null : messages.join('\n');
+  }
+
+  void reportImportRecovery(BankConnection? connection) {
+    if (connection != null) {
+      _importConnections.removeWhere((item) => item?.id == connection.id);
+    }
+    if (!_importConnections.any((item) => item == null && connection == null)) {
+      _importConnections.add(connection);
+    }
+    _importIssue =
+        'Could not resume the account import. Try again. Other connected banks can still sync.';
+    _publish();
+  }
+
+  void clearImportRecovery(BankConnection connection) {
+    _importConnections.removeWhere(
+      (item) => item?.sameLifecycle(connection) == true,
+    );
+    _importIssue = _importConnections.isEmpty
+        ? null
+        : 'Could not resume the account import. Try again. Other connected banks can still sync.';
+    _publish();
   }
 
   void clear() {
     _syncIssue = null;
-    state = _recoveryIssue;
+    _publish();
   }
 }
 
@@ -222,16 +257,32 @@ class ConnectBankFlowState {
   final List<BankingAccount> importable;
   final BankConnection? connection;
   final bool authorizing;
+  final List<BankingAccountImportOutcome> outcomes;
+  final BankingImportStatus importStatus;
+  final BankingImportFailureScope? failureScope;
 
   const ConnectBankFlowState({
     this.aspsps = const [],
     this.importable = const [],
     this.connection,
     this.authorizing = false,
+    this.outcomes = const [],
+    this.importStatus = BankingImportStatus.idle,
+    this.failureScope,
   });
 
   int? get connectionId => connection?.id;
+  bool get loading => importStatus == BankingImportStatus.loading;
+  bool get canImport =>
+      !loading &&
+      importStatus != BankingImportStatus.terminal &&
+      importStatus != BankingImportStatus.pending &&
+      importStatus != BankingImportStatus.obsolete &&
+      importable.isNotEmpty;
 }
+
+typedef BankImportContextCollector =
+    Future<Map<String, String>?> Function(List<String> requiredHeaders);
 
 @Riverpod(keepAlive: true)
 BankSyncRepository bankSyncRepository(Ref ref) =>
@@ -293,6 +344,8 @@ Future<num?> ebAccountBalance(Ref ref, String accountUid) async {
 @Riverpod(keepAlive: true)
 class ConnectBankFlow extends _$ConnectBankFlow {
   int _operation = 0;
+  bool _interactive = false;
+  bool _submitting = false;
   @override
   ConnectBankFlowState build() => const ConnectBankFlowState();
 
@@ -371,100 +424,498 @@ class ConnectBankFlow extends _$ConnectBankFlow {
     }
   }
 
-  Future<void> resumeImport({int? connectionId}) async {
-    final operation = ++_operation;
-    await recoverBankSessions(ref);
-    final resumable = await ref
-        .read(bankConsentLifecycleServiceProvider)
-        .resumeAwaitingImports();
-    final matches = resumable.where(
-      (item) => connectionId == null || item.connection.id == connectionId,
-    );
-    if (matches.isEmpty) return;
-    final item = matches.first;
-    final accounts = <BankingAccount>[];
-    for (final reference in item.details.accounts) {
-      accounts.add(
-        await ref.read(bankAccountDataSourceProvider).getAccount(reference),
-      );
+  Future<bool> _current(
+    BankConnection expected,
+    int operation,
+    int credentials,
+  ) async {
+    if (!ref.mounted ||
+        operation != _operation ||
+        credentials !=
+            ref
+                .read(enableBankingCredentialsStoreProvider)
+                .credentialRevision) {
+      return false;
     }
-    if (!ref.mounted || operation != _operation) return;
+    final repository = ref.read(bankConnectionRepositoryProvider);
+    final readContext = ref.read(bankAuthorizationContextReaderProvider);
+    try {
+      final current = await repository.findById(expected.id!);
+      final owner = await readContext();
+      return ref.mounted &&
+          operation == _operation &&
+          credentials ==
+              ref
+                  .read(enableBankingCredentialsStoreProvider)
+                  .credentialRevision &&
+          current != null &&
+          current.sameLifecycle(expected) &&
+          owner.applicationId == expected.applicationId &&
+          owner.providerId == expected.providerId;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  void _importState(
+    BankConnection connection,
+    List<BankingAccountImportOutcome> outcomes,
+    BankingImportStatus status, {
+    BankingImportFailureScope? failureScope,
+  }) {
     state = ConnectBankFlowState(
-      connection: item.connection,
-      importable: accounts,
+      connection: connection,
+      outcomes: List.unmodifiable(outcomes),
+      importStatus: status,
+      failureScope: failureScope,
+      importable: List.unmodifiable(
+        status == BankingImportStatus.terminal
+            ? <BankingAccount>[]
+            : outcomes.map((item) => item.account).nonNulls,
+      ),
     );
+  }
+
+  BankingImportFailureScope _scope(Object error) => switch (error) {
+    BankingException(
+      failure: BankingFailure.connectionExpired ||
+          BankingFailure.connectionRevoked ||
+          BankingFailure.connectionClosed,
+    ) =>
+      BankingImportFailureScope.consent,
+    BankingException(
+      failure: BankingFailure.authentication || BankingFailure.forbidden,
+    ) =>
+      BankingImportFailureScope.application,
+    _ => BankingImportFailureScope.account,
+  };
+
+  Future<void> _terminalTransition(
+    BankConnection settled,
+    List<BankingAccountImportOutcome> outcomes,
+    int operation,
+    int credentials,
+    BankingFailure? failure,
+  ) async {
+    if (!await _current(settled, operation, credentials)) return;
+    final scope =
+        failure == BankingFailure.authentication ||
+            failure == BankingFailure.forbidden
+        ? BankingImportFailureScope.application
+        : BankingImportFailureScope.consent;
+    _importState(
+      settled,
+      [
+        for (final outcome in outcomes)
+          BankingAccountImportOutcome(
+            descriptor: outcome.descriptor,
+            status: BankingAccountImportStatus.failed,
+            scope: scope,
+            code: 'connection_unavailable',
+          ),
+      ],
+      BankingImportStatus.terminal,
+      failureScope: scope,
+    );
+    ref.read(bankRecoveryIssueProvider.notifier).reportImportRecovery(settled);
     ref.invalidate(bankConnectionsProvider);
   }
 
-  Future<BankSyncSummary> importAccounts(
-    List<BankAccountImportSelection> selections,
-  ) async {
-    final operation = _operation;
-    final expected = selections.isEmpty
-        ? null
-        : selections.first.expectedStaging;
-    final connectionId = expected?.id;
-    if (connectionId == null || selections.isEmpty) {
-      throw const ConnectBankFlowException(
-        'Select accounts from an active connection.',
-      );
+  Future<void> resumeImport({
+    int? connectionId,
+    BankingAccountReference? accountReference,
+    BankImportContextCollector? collectContext,
+  }) async {
+    if (_interactive || _submitting) {
+      final shown = state.connection;
+      if (shown == null) return;
+      final current = await ref
+          .read(bankConnectionRepositoryProvider)
+          .findById(shown.id!);
+      if (!ref.mounted || current == null || current.sameLifecycle(shown)) {
+        return;
+      }
     }
-    if (state.connection == null ||
-        !state.connection!.sameLifecycle(expected!) ||
-        selections.any(
-          (selection) => !selection.expectedStaging.sameLifecycle(expected),
-        )) {
-      throw const ConnectBankFlowException(
-        'The bank connection changed. Reload the accounts before importing.',
+    final interactive = collectContext != null;
+    _interactive = interactive;
+    final operation = ++_operation;
+    final credentials = ref
+        .read(enableBankingCredentialsStoreProvider)
+        .credentialRevision;
+    BankConnection? expected;
+    var outcomes = <BankingAccountImportOutcome>[];
+    try {
+      await recoverBankSessions(ref);
+      if (!ref.mounted || operation != _operation) return;
+      final staged = await ref
+          .read(bankConnectionRepositoryProvider)
+          .selectAwaitingImport();
+      if (!ref.mounted || operation != _operation) return;
+      final candidates = staged.where(
+        (item) => connectionId == null || item.id == connectionId,
       );
-    }
-    if (selections.any(
-      (selection) => !state.importable.any(
-        (account) => account.reference == selection.account.reference,
-      ),
-    )) {
-      throw const ConnectBankFlowException(
-        'The selected account is not part of this connection.',
+      if (candidates.isEmpty) return;
+      expected = candidates.first;
+      if (!await _current(expected, operation, credentials)) return;
+      final retained = state.connection?.sameLifecycle(expected) == true
+          ? state.outcomes
+          : <BankingAccountImportOutcome>[];
+      outcomes = retained.toList();
+      _importState(expected, outcomes, BankingImportStatus.loading);
+      BankConnection? settled;
+      BankingFailure? rejection;
+      final resumable = await ref
+          .read(bankConsentLifecycleServiceProvider)
+          .resumeAwaitingImports(
+            expectedStaging: expected,
+            onRejected: (connection, failure) {
+              settled = connection;
+              rejection = failure;
+            },
+          );
+      if (!await _current(expected, operation, credentials)) {
+        if (settled != null) {
+          await _terminalTransition(
+            settled!,
+            outcomes,
+            operation,
+            credentials,
+            rejection,
+          );
+        }
+        return;
+      }
+      final matches = resumable.where(
+        (item) => item.connection.sameLifecycle(expected!),
       );
-    }
-    final previous = await ref.read(accountsProvider.future);
-    if (!ref.mounted ||
-        operation != _operation ||
-        state.connection == null ||
-        !state.connection!.sameLifecycle(expected)) {
-      throw const ConnectBankFlowException(
-        'The bank connection changed. Reload the accounts before importing.',
-      );
-    }
-    await ref
-        .read(bankConsentLifecycleServiceProvider)
-        .activateConnection(connectionId, [
-          for (var index = 0; index < selections.length; index++)
-            (
-              remote: selections[index].account,
-              newAccount: BankAccount(
-                name: selections[index].name,
-                symbol: selections[index].symbol,
-                color: selections[index].color,
-                startingValue: 0,
-                active: true,
-                countNetWorth: true,
-                mainAccount: previous.isEmpty && index == 0,
-                order: previous.length + index,
-              ),
+      if (matches.isEmpty) {
+        _importState(expected, outcomes, BankingImportStatus.pending);
+        ref
+            .read(bankRecoveryIssueProvider.notifier)
+            .reportImportRecovery(expected);
+        return;
+      }
+      final item = matches.first;
+      if (item.details.accountDescriptors.every(
+        (item) => item.reference == null,
+      )) {
+        outcomes = [
+          for (final descriptor in item.details.accountDescriptors)
+            BankingAccountImportOutcome(
+              descriptor: descriptor,
+              status: BankingAccountImportStatus.unavailable,
             ),
-        ], expectedStaging: expected);
-    if (!ref.mounted ||
-        operation != _operation ||
-        state.connection == null ||
-        !state.connection!.sameLifecycle(expected)) {
+        ];
+        final status = bankingImportStatus(outcomes);
+        _importState(expected, outcomes, status);
+        final issue = ref.read(bankRecoveryIssueProvider.notifier);
+        if (status == BankingImportStatus.empty) {
+          issue.clearImportRecovery(expected);
+        } else {
+          issue.reportImportRecovery(expected);
+        }
+        return;
+      }
+      final required = await requiredSyncHeaders(expected);
+      if (!await _current(expected, operation, credentials)) return;
+      Map<String, String> headers = const {};
+      if (required.isNotEmpty) {
+        if (collectContext == null) {
+          _importState(
+            expected,
+            outcomes,
+            BankingImportStatus.manualContextRequired,
+          );
+          ref
+              .read(bankRecoveryIssueProvider.notifier)
+              .reportImportRecovery(expected);
+          return;
+        }
+        final values = await collectContext(required);
+        if (!await _current(expected, operation, credentials)) return;
+        if (values == null) {
+          _importState(expected, outcomes, BankingImportStatus.cancelled);
+          return;
+        }
+        headers = BankSyncRequest(
+          trigger: BankSyncTrigger.manual,
+          psuHeaders: values,
+        ).headersFor(required);
+      }
+      final context = BankingRequestContext(psuHeaders: headers);
+      final data = ref.read(bankAccountDataSourceProvider);
+      final next = <BankingAccountImportOutcome>[];
+      BankingImportFailureScope? terminal;
+      for (final descriptor in item.details.accountDescriptors) {
+        final reference = descriptor.reference;
+        final old = retained.where(
+          (outcome) =>
+              reference != null && outcome.descriptor.reference == reference,
+        );
+        if (terminal != null) {
+          next.add(
+            BankingAccountImportOutcome(
+              descriptor: descriptor,
+              status: BankingAccountImportStatus.failed,
+              scope: terminal,
+              code: 'connection_unavailable',
+            ),
+          );
+        } else if (reference == null) {
+          next.add(
+            BankingAccountImportOutcome(
+              descriptor: descriptor,
+              status: BankingAccountImportStatus.unavailable,
+            ),
+          );
+        } else if (accountReference != null &&
+            reference != accountReference &&
+            old.isNotEmpty) {
+          next.add(old.first);
+        } else {
+          try {
+            final loaded = await data.getAccount(reference, context: context);
+            if (!await _current(expected, operation, credentials)) return;
+            if (loaded.reference != reference) {
+              throw const FormatException('Account identity mismatch');
+            }
+            final account = BankingAccount(
+              reference: BankingAccountReference(
+                providerId: reference.providerId,
+                remoteId: reference.remoteId,
+                identityKeys: {
+                  ...reference.identityKeys,
+                  ...loaded.reference.identityKeys,
+                },
+              ),
+              iban: loaded.iban ?? descriptor.iban,
+              name: loaded.name ?? descriptor.name,
+              details: loaded.details ?? descriptor.details,
+              currency: loaded.currency ?? descriptor.currency,
+              product: loaded.product ?? descriptor.product,
+              accountType: loaded.accountType ?? descriptor.accountType,
+              usage: loaded.usage ?? descriptor.usage,
+            );
+            num? balance;
+            String? code;
+            try {
+              final balances = await data.getBalances(
+                reference,
+                context: context,
+              );
+              if (!await _current(expected, operation, credentials)) return;
+              final booked = balances.where(
+                (item) =>
+                    item.kind == BankingBalanceKind.closingBooked ||
+                    item.kind == BankingBalanceKind.interimBooked,
+              );
+              if (booked.isNotEmpty) {
+                balance = num.tryParse(booked.first.amount.decimalAmount);
+              }
+            } catch (error) {
+              if (!await _current(expected, operation, credentials)) return;
+              if (_scope(error) != BankingImportFailureScope.account) rethrow;
+              code = 'balance_unavailable';
+            }
+            next.add(
+              BankingAccountImportOutcome(
+                descriptor: descriptor,
+                account: account,
+                status: BankingAccountImportStatus.available,
+                balance: balance,
+                code: code,
+              ),
+            );
+          } catch (error) {
+            if (!await _current(expected, operation, credentials)) return;
+            final scope = _scope(error);
+            if (scope != BankingImportFailureScope.account) terminal = scope;
+            next.add(
+              BankingAccountImportOutcome(
+                descriptor: descriptor,
+                status: BankingAccountImportStatus.failed,
+                scope: scope,
+                code: error is BankingException
+                    ? error.failure.name
+                    : 'account_unavailable',
+              ),
+            );
+          }
+        }
+      }
+      if (!await _current(expected, operation, credentials)) return;
+      outcomes = next;
+      final status = terminal == null
+          ? bankingImportStatus(outcomes)
+          : BankingImportStatus.terminal;
+      _importState(expected, outcomes, status, failureScope: terminal);
+      final issue = ref.read(bankRecoveryIssueProvider.notifier);
+      if (status == BankingImportStatus.ready ||
+          status == BankingImportStatus.empty) {
+        issue.clearImportRecovery(expected);
+      } else {
+        issue.reportImportRecovery(expected);
+      }
+      ref.invalidate(bankConnectionsProvider);
+    } catch (error) {
+      if (expected != null &&
+          await _current(expected, operation, credentials)) {
+        final scope = _scope(error);
+        _importState(
+          expected,
+          outcomes,
+          scope == BankingImportFailureScope.account
+              ? BankingImportStatus.allFailed
+              : BankingImportStatus.terminal,
+          failureScope: scope,
+        );
+        ref
+            .read(bankRecoveryIssueProvider.notifier)
+            .reportImportRecovery(expected);
+      }
+    } finally {
+      if (operation == _operation) {
+        _interactive = false;
+        if (expected != null &&
+            ref.mounted &&
+            state.loading &&
+            state.connection?.sameLifecycle(expected) == true &&
+            !await _current(expected, operation, credentials) &&
+            ref.mounted &&
+            operation == _operation &&
+            state.connection?.sameLifecycle(expected) == true) {
+          _importState(expected, state.outcomes, BankingImportStatus.obsolete);
+        }
+      }
+    }
+  }
+
+  Future<BankSyncSummary> importAccounts(
+    List<BankAccountImportSelection> selections, {
+    BankImportContextCollector? collectContext,
+  }) async {
+    if (_submitting) {
       throw const ConnectBankFlowException(
-        'The bank connection changed. Reload the accounts before importing.',
+        'The accounts are already being imported.',
       );
     }
-    state = const ConnectBankFlowState();
-    _refreshBankData(ref);
-    return syncConnectionId(connectionId, initial: true);
+    _submitting = true;
+    try {
+      final operation = _operation;
+      final credentials = ref
+          .read(enableBankingCredentialsStoreProvider)
+          .credentialRevision;
+      final expected = selections.isEmpty
+          ? null
+          : selections.first.expectedStaging;
+      final connectionId = expected?.id;
+      if (connectionId == null || selections.isEmpty) {
+        throw const ConnectBankFlowException(
+          'Select accounts from an active connection.',
+        );
+      }
+      if (state.connection == null ||
+          !state.connection!.sameLifecycle(expected!) ||
+          selections.any(
+            (selection) => !selection.expectedStaging.sameLifecycle(expected),
+          )) {
+        throw const ConnectBankFlowException(
+          'The bank connection changed. Reload the accounts before importing.',
+        );
+      }
+      if (selections.any(
+        (selection) => !state.importable.any(
+          (account) => account.reference == selection.account.reference,
+        ),
+      )) {
+        throw const ConnectBankFlowException(
+          'The selected account is not part of this connection.',
+        );
+      }
+      if (!state.canImport ||
+          !await _current(expected, operation, credentials)) {
+        throw const ConnectBankFlowException(
+          'The bank connection changed. Reload the accounts before importing.',
+        );
+      }
+      final required = await requiredSyncHeaders(expected);
+      if (!await _current(expected, operation, credentials)) {
+        throw const ConnectBankFlowException(
+          'The bank connection changed. Reload the accounts before importing.',
+        );
+      }
+      Map<String, String> headers = const {};
+      if (required.isNotEmpty) {
+        if (collectContext == null) {
+          throw const ConnectBankFlowException(
+            'Additional details are required to import these accounts.',
+          );
+        }
+        final values = await collectContext(required);
+        if (!await _current(expected, operation, credentials)) {
+          throw const ConnectBankFlowException(
+            'The bank connection changed. Reload the accounts before importing.',
+          );
+        }
+        if (values == null) {
+          throw const ConnectBankFlowException(
+            'Account loading was cancelled. Try again when you are ready.',
+          );
+        }
+        headers = BankSyncRequest(
+          trigger: BankSyncTrigger.manual,
+          psuHeaders: values,
+        ).headersFor(required);
+      }
+      final previous = await ref.read(accountsProvider.future);
+      if (!ref.mounted ||
+          operation != _operation ||
+          state.connection == null ||
+          !state.connection!.sameLifecycle(expected)) {
+        throw const ConnectBankFlowException(
+          'The bank connection changed. Reload the accounts before importing.',
+        );
+      }
+      final activated = await ref
+          .read(bankConsentLifecycleServiceProvider)
+          .activateConnection(connectionId, [
+            for (var index = 0; index < selections.length; index++)
+              (
+                remote: selections[index].account,
+                newAccount: BankAccount(
+                  name: selections[index].name,
+                  symbol: selections[index].symbol,
+                  color: selections[index].color,
+                  startingValue: 0,
+                  active: true,
+                  countNetWorth: true,
+                  mainAccount: previous.isEmpty && index == 0,
+                  order: previous.length + index,
+                ),
+              ),
+          ], expectedStaging: expected);
+      if (!ref.mounted ||
+          operation != _operation ||
+          state.connection == null ||
+          !state.connection!.sameLifecycle(expected)) {
+        throw const ConnectBankFlowException(
+          'The bank connection changed. Reload the accounts before importing.',
+        );
+      }
+      if (!await _current(activated, operation, credentials)) {
+        throw const ConnectBankFlowException(
+          'The bank connection changed. Reload the accounts before importing.',
+        );
+      }
+      ref
+          .read(bankRecoveryIssueProvider.notifier)
+          .clearImportRecovery(expected);
+      state = const ConnectBankFlowState();
+      _refreshBankData(ref);
+      return await syncConnectionId(connectionId, psuHeaders: headers);
+    } finally {
+      _submitting = false;
+    }
   }
 
   Future<BankSyncSummary> syncConnectionId(
@@ -532,6 +983,7 @@ class ConnectBankFlow extends _$ConnectBankFlow {
 
   Future<void> cancelAuthorization() {
     ++_operation;
+    _interactive = false;
     return ref.read(bankConsentLifecycleServiceProvider).cancelAuthorization();
   }
 }
@@ -548,7 +1000,15 @@ Future<void> bankingUiBootstrap(Ref ref) async {
       if (!ref.mounted) return false;
       final credentials = await ref.read(enableBankingSettingsProvider.future);
       if (credentials == null || !ref.mounted) return false;
-      await ref.read(connectBankFlowProvider.notifier).resumeImport();
+      try {
+        await ref.read(connectBankFlowProvider.notifier).resumeImport();
+      } catch (_) {
+        if (ref.mounted) {
+          ref
+              .read(bankRecoveryIssueProvider.notifier)
+              .reportImportRecovery(null);
+        }
+      }
       return ref.mounted;
     },
     onResult: (result) {

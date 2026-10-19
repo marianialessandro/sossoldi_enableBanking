@@ -1,77 +1,87 @@
-import 'dart:io';
+import 'dart:async';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:sossoldi/providers/banking_ui_provider.dart';
+import 'package:sossoldi/services/banking/banking_account_import_result.dart';
+import 'package:sossoldi/services/banking/sync/bank_sync_request.dart';
+import 'package:sossoldi/services/banking/sync/bank_sync_result.dart';
+import 'package:sossoldi/services/banking/sync/bank_sync_service.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import '../../support/bank_sync_harness.dart';
+import '../../helpers/banking_recovery_harness.dart';
 
-class _Settings extends EnableBankingSettings {
-  @override
-  Future<EnableBankingConfig?> build() async =>
-      const EnableBankingConfig(appId: 'synthetic-app');
-}
-
-class _Recovery extends ConnectBankFlow {
-  bool offline = true;
+class _ObservedSync implements BankSyncService {
+  final BankSyncService actual;
+  Completer<void> completed = Completer<void>();
   int calls = 0;
+  _ObservedSync(this.actual);
   @override
-  ConnectBankFlowState build() => const ConnectBankFlowState();
-  @override
-  Future<void> resumeImport({int? connectionId}) async {
+  Future<BankSyncSummary> syncAll({
+    BankSyncRequest request = const BankSyncRequest(),
+  }) async {
     calls++;
-    if (offline) throw const SocketException('Synthetic offline startup');
+    try {
+      return await actual.syncAll(request: request);
+    } finally {
+      if (!completed.isCompleted) completed.complete();
+    }
   }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 void main() {
   final binding = TestWidgetsFlutterBinding.ensureInitialized();
   test(
-    'offline startup exposes an error and app resume retries recovery',
+    'real offline import preserves warning while independent real sync finishes, then resume retries',
     () async {
       sqfliteFfiInit();
       final h = BankSyncHarness(databaseFactoryFfi);
       await h.open();
       addTearDown(h.close);
-      final flow = _Recovery();
-      final container = ProviderContainer(
-        overrides: [
-          enableBankingSettingsProvider.overrideWith(_Settings.new),
-          bankingCallbackBootstrapProvider.overrideWith((ref) async {}),
-          connectBankFlowProvider.overrideWith(() => flow),
-          bankSyncServiceProvider.overrideWithValue(h.service),
-        ],
-      );
-      addTearDown(container.dispose);
+      final recovery = BankingRecoveryHarness();
+      final observed = _ObservedSync(h.service);
+      await recovery.initialize(syncService: observed);
+      addTearDown(recovery.dispose);
+      await recovery.configure('A');
+      final staged = await recovery.stage();
+      recovery.sessionOffline = true;
+      final container = recovery.container;
       container.listen(
         bankingUiBootstrapProvider,
         (_, _) {},
         fireImmediately: true,
       );
-      await (() async {
-        await container.read(bankingUiBootstrapProvider.future);
-        for (
-          var i = 0;
-          i < 100 && container.read(bankRecoveryIssueProvider) == null;
-          i++
-        ) {
-          await Future<void>.delayed(const Duration(milliseconds: 5));
-        }
-      })();
-      final attemptsBeforeResume = flow.calls;
-      expect(attemptsBeforeResume, greaterThanOrEqualTo(1));
-      expect(container.read(bankRecoveryIssueProvider), isNotNull);
-      flow.offline = false;
+      await observed.completed.future;
+      await container.pump();
+      expect(observed.calls, 1);
+      expect(await h.transactions(), hasLength(1));
+      expect(
+        container.read(connectBankFlowProvider).importStatus,
+        BankingImportStatus.allFailed,
+      );
+      expect(
+        container.read(bankRecoveryIssueProvider),
+        contains('Other connected banks can still sync'),
+      );
+      expect(
+        (await recovery.repository.selectById(
+          staged.id!,
+        )).sameLifecycle(staged),
+        isTrue,
+      );
+      recovery.sessionOffline = false;
+      observed.completed = Completer<void>();
       binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
       binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
-      await (() async {
-        for (var i = 0; i < 100 && (await h.transactions()).isEmpty; i++) {
-          await Future<void>.delayed(const Duration(milliseconds: 5));
-        }
-      })();
-      expect(flow.calls, greaterThan(attemptsBeforeResume));
+      await observed.completed.future;
+      await container.pump();
+      expect(observed.calls, 2);
       expect(await h.transactions(), hasLength(1));
       expect(container.read(bankRecoveryIssueProvider), isNull);
+      expect(container.read(connectBankFlowProvider).importable, hasLength(1));
+      expect(recovery.posts, 0);
     },
   );
 }
