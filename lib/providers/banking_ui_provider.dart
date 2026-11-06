@@ -232,6 +232,7 @@ void _refreshBankData(Ref ref) {
   ref.invalidate(bankConnectionSyncStatusProvider);
   ref.invalidate(accountsProvider);
   ref.invalidate(transactionsProvider);
+  ref.invalidate(lastTransactionsProvider);
   ref.invalidate(dashboardProvider);
   ref.invalidate(statisticsProvider);
 }
