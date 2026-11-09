@@ -201,9 +201,9 @@ class TransactionsNotifier extends _$TransactionsNotifier {
       type: t,
       note: label,
       idBankAccount: (account ?? ref.read(selectedBankAccountProvider))!.id!,
-      idBankAccountTransfer: account != null
-          ? null
-          : ref.read(bankAccountTransferProvider)?.id,
+      idBankAccountTransfer: account == null && t == TransactionType.transfer
+          ? ref.read(bankAccountTransferProvider)?.id
+          : null,
       idCategory: account != null || t == TransactionType.transfer
           ? null
           : ref.read(selectedCategoryProvider)?.id,
@@ -254,8 +254,10 @@ class TransactionsNotifier extends _$TransactionsNotifier {
       type: type,
       note: label,
       idBankAccount: bankAccount.id!,
-      idBankAccountTransfer: bankAccountTransfer?.id,
-      idCategory: category?.id,
+      idBankAccountTransfer: type == TransactionType.transfer
+          ? bankAccountTransfer?.id
+          : null,
+      idCategory: type == TransactionType.transfer ? null : category?.id,
       idRecurringTransaction: recurringTransactionId,
       recurring: recurringTransactionId != null ? true : false,
     );
