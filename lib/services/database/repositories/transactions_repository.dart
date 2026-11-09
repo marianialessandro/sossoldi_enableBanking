@@ -74,7 +74,7 @@ class TransactionsRepository {
         : null; // filter type
     if (date != null) {
       where =
-          "${where != null ? '$where and ' : ''}strftime('%Y-%m-%d', ${TransactionFields.date}) >= '${date.toString().substring(0, 10)}' and ${TransactionFields.date} <= '${date.toIso8601String().substring(0, 10)}'";
+          "${where != null ? '$where and ' : ''}strftime('%Y-%m-%d', ${TransactionFields.date}) = '${date.toIso8601String().substring(0, 10)}'";
     } else if (dateRangeStart != null && dateRangeEnd != null) {
       where =
           "${where != null ? '$where and ' : ''}strftime('%Y-%m-%d', ${TransactionFields.date}) BETWEEN '${dateRangeStart.toString().substring(0, 10)}' and '${dateRangeEnd.toIso8601String().substring(0, 10)}'";
@@ -99,7 +99,7 @@ class TransactionsRepository {
           .where((bankAccount) => bankAccount.value)
           .map((e) => "'${e.key}'");
       where =
-          "${where != null ? '$where and ' : ''}t.${TransactionFields.idBankAccount} IN (${bankAccountIds.join(',')}) ";
+          "${where != null ? '$where and ' : ''}(t.${TransactionFields.idBankAccount} IN (${bankAccountIds.join(',')}) OR (t.${TransactionFields.type} = 'TRSF' AND t.${TransactionFields.idBankAccountTransfer} IN (${bankAccountIds.join(',')}))) ";
     }
 
     final orderByDESC = '${TransactionFields.date} DESC';
