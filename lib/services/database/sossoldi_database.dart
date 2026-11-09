@@ -18,6 +18,7 @@ import '../../model/recurring_transaction.dart';
 import '../../model/transaction.dart';
 import '../banking/lifecycle/banking_backup_policy.dart';
 import 'migration_manager.dart';
+import 'csv_import_validator.dart';
 
 part 'sossoldi_database.g.dart';
 
@@ -144,9 +145,9 @@ class SossoldiDatabase {
       }
 
       final String csvData = await file.readAsString();
-      final List<List<dynamic>> rows = const CsvToListConverter().convert(
-        csvData,
-      );
+      final List<List<dynamic>> rows = const CsvToListConverter(
+        shouldParseNumbers: false,
+      ).convert(csvData);
 
       if (rows.isEmpty) {
         throw Exception('CSV file is empty');
@@ -159,6 +160,13 @@ class SossoldiDatabase {
       if (tableNameIndex == -1) {
         throw Exception('CSV file missing table_name column');
       }
+
+      final validatedRows = await CsvImportValidator.validate(
+        db,
+        headers,
+        rows.skip(1).toList(),
+        tableNameIndex,
+      );
 
       // Group rows by table
       Map<String, List<List<dynamic>>> tableData = {};
@@ -180,23 +188,8 @@ class SossoldiDatabase {
 
             // Insert new data
             for (int i = 1; i < tableRows.length; i++) {
-              final Map<String, dynamic> row = {};
-              for (int j = 0; j < headers.length; j++) {
-                if (j != tableNameIndex) {
-                  // Skip the table_name column
-                  final String header = headers[j];
-                  final dynamic value = tableRows[i][j];
-
-                  // Convert empty strings to null
-                  if (value != '') {
-                    row[header] = value;
-                  }
-                }
-              }
-              await txn.insert(
-                tableName,
-                BankingBackupPolicy.sanitizeForRestore(tableName, row),
-              );
+              final row = validatedRows[tableRows[i]]!;
+              await txn.insert(tableName, row);
             }
             results[tableName] = true;
           } catch (e) {
