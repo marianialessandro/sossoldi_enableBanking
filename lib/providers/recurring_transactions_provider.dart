@@ -37,8 +37,10 @@ class RecurringTransactionsNotifier extends _$RecurringTransactionsNotifier {
   Future<RecurringTransaction?> create(
     num amount,
     String label,
-    TransactionType type,
-  ) async {
+    TransactionType type, {
+    Transaction? existingTransaction,
+    DateTime? clock,
+  }) async {
     state = const AsyncLoading();
 
     final date = ref.read(selectedDateProvider);
@@ -64,32 +66,33 @@ class RecurringTransactionsNotifier extends _$RecurringTransactionsNotifier {
     // Here we need the recurringTransaction just inserted, to get and return a model with also his ID
     RecurringTransaction? insertedTransaction;
 
-    state = await AsyncValue.guard(() async {
+    final outcome = await AsyncValue.guard(() async {
+      final now = clock ?? DateTime.now();
+      final isToday =
+          date.year == now.year &&
+          date.month == now.month &&
+          date.day == now.day;
+      final initial = existingTransaction != null || isToday
+          ? Transaction(
+              id: existingTransaction?.id,
+              date: date,
+              amount: amount,
+              type: type,
+              note: label,
+              idBankAccount: bankAccount.id!,
+              idCategory: category.id!,
+              recurring: true,
+              createdAt: existingTransaction?.createdAt,
+              updatedAt: existingTransaction?.updatedAt,
+            )
+          : null;
       insertedTransaction = await ref
           .read(recurringTransactionRepositoryProvider)
-          .insert(transaction);
-
-      // check if fromDate is today, and add the first recurrence of the transaction
-      DateTime now = DateTime.now();
-
-      if (date.year == now.year &&
-          date.month == now.month &&
-          date.day == now.day) {
-        final transaction = Transaction(
-          date: date,
-          amount: amount,
-          type: type,
-          note: label,
-          idBankAccount: bankAccount.id!,
-          idCategory: category.id!,
-          idRecurringTransaction: insertedTransaction!.id,
-          recurring: true,
-        );
-        await ref.read(transactionsRepositoryProvider).insert(transaction);
-      }
+          .insertWithTransaction(transaction, firstTransaction: initial);
       return await _getRecurringTransactions();
     });
 
+    if (ref.mounted) state = outcome;
     return insertedTransaction;
   }
 

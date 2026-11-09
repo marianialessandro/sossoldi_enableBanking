@@ -32,6 +32,47 @@ class RecurringTransactionRepository {
     return null;
   }
 
+  /// Saves the schedule and its initial or attached movement as one operation.
+  Future<RecurringTransaction> insertWithTransaction(
+    RecurringTransaction item, {
+    Transaction? firstTransaction,
+  }) async {
+    final db = await _sossoldiDB.database;
+    return db.transaction((txn) async {
+      final id = await txn.insert(recurringTransactionTable, item.toJson());
+      if ((await txn.rawQuery(
+            'SELECT changes() AS changed',
+          )).single['changed'] !=
+          1) {
+        throw StateError('Recurring transaction was not saved');
+      }
+      if (firstTransaction != null) {
+        final movement = firstTransaction.copy(
+          idRecurringTransaction: id,
+          recurring: true,
+        );
+        if (movement.id == null) {
+          await txn.insert(transactionTable, movement.toJson());
+          if ((await txn.rawQuery(
+                'SELECT changes() AS changed',
+              )).single['changed'] !=
+              1) {
+            throw StateError('Initial transaction was not saved');
+          }
+        } else {
+          final changed = await txn.update(
+            transactionTable,
+            movement.toJson(update: true),
+            where: '${TransactionFields.id} = ?',
+            whereArgs: [movement.id],
+          );
+          if (changed != 1) throw StateError('Transaction no longer exists');
+        }
+      }
+      return item.copy(id: id);
+    });
+  }
+
   Future<RecurringTransaction> selectById(int id) async {
     final db = await _sossoldiDB.database;
 

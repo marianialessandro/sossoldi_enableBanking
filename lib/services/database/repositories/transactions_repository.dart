@@ -21,8 +21,16 @@ class TransactionsRepository {
 
   Future<Transaction> insert(Transaction item) async {
     final db = await _sossoldiDB.database;
-    final id = await db.insert(transactionTable, item.toJson());
-    return item.copy(id: id);
+    return db.transaction((txn) async {
+      final id = await txn.insert(transactionTable, item.toJson());
+      if ((await txn.rawQuery(
+            'SELECT changes() AS changed',
+          )).single['changed'] !=
+          1) {
+        throw StateError('Transaction was not saved');
+      }
+      return item.copy(id: id);
+    });
   }
 
   Future<Transaction> selectById(int id) async {
