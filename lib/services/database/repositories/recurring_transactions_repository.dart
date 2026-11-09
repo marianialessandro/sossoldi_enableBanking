@@ -2,11 +2,11 @@ import 'dart:developer' as dev;
 
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sqflite/sqflite.dart' hide Transaction;
 
 import '../../../model/recurring_transaction.dart';
 import '../../../model/transaction.dart';
 import '../sossoldi_database.dart';
-import 'transactions_repository.dart';
 
 part 'recurring_transactions_repository.g.dart';
 
@@ -16,10 +16,17 @@ RecurringTransactionRepository recurringTransactionRepository(Ref ref) {
 }
 
 class RecurringTransactionRepository {
-  RecurringTransactionRepository({required SossoldiDatabase database})
-    : _sossoldiDB = database;
+  RecurringTransactionRepository({
+    required SossoldiDatabase database,
+    DateTime Function()? clock,
+  }) : _sossoldiDB = database,
+       _clock = clock ?? DateTime.now;
 
   final SossoldiDatabase _sossoldiDB;
+  final DateTime Function() _clock;
+  Future<void>? _dailyCheckFlight;
+  bool _retryDailyCheck = false;
+  DateTime? _dailyCheckInstant;
 
   Future<RecurringTransaction?> insert(RecurringTransaction item) async {
     try {
@@ -59,7 +66,7 @@ class RecurringTransactionRepository {
     return result.map((json) => RecurringTransaction.fromJson(json)).toList();
   }
 
-  Future<List<RecurringTransaction>> selectAllActive() async {
+  Future<List<RecurringTransaction>> selectAllActive({DateTime? now}) async {
     final db = await _sossoldiDB.database;
 
     final orderBy = '${RecurringTransactionFields.createdAt} ASC';
@@ -69,7 +76,7 @@ class RecurringTransactionRepository {
       orderBy: orderBy,
       where:
           '${RecurringTransactionFields.toDate} IS NULL OR ${RecurringTransactionFields.toDate} > ?',
-      whereArgs: [DateTime.now().toIso8601String()],
+      whereArgs: [(now ?? _clock()).toIso8601String()],
     );
 
     return result.map((json) => RecurringTransaction.fromJson(json)).toList();
@@ -119,63 +126,91 @@ class RecurringTransactionRepository {
 
   static const _lastCheckKey = 'last_recurring_transactions_check';
 
-  /// Runs [checkRecurringTransactions] at most once a day.
-  Future<void> dailyCheck(SharedPreferences prefs) async {
-    final lastCheck = prefs.getString(_lastCheckKey);
-    if (lastCheck != null &&
-        DateTime.now().difference(DateTime.parse(lastCheck)).inDays < 1) {
-      return;
-    }
-    await checkRecurringTransactions();
-    await prefs.setString(_lastCheckKey, DateTime.now().toIso8601String());
+  /// Runs [checkRecurringTransactions] at most once per rolling 24-hour period.
+  Future<void> dailyCheck(SharedPreferences prefs) {
+    final active = _dailyCheckFlight;
+    if (active != null) return active;
+    final flight = _performDailyCheck(prefs);
+    _dailyCheckFlight = flight;
+    return flight.whenComplete(() {
+      if (identical(_dailyCheckFlight, flight)) _dailyCheckFlight = null;
+    });
   }
 
-  Future<void> checkRecurringTransactions() async {
-    // get all recurring transactions active
-    final transactions = await selectAllActive();
-
-    if (transactions.isEmpty) {
-      return;
+  Future<void> _performDailyCheck(SharedPreferences prefs) async {
+    final now = _clock();
+    final rawMarker = prefs.get(_lastCheckKey);
+    final lastCheck = rawMarker is String ? DateTime.tryParse(rawMarker) : null;
+    if (!_retryDailyCheck && lastCheck != null) {
+      final elapsed = now.toUtc().difference(lastCheck.toUtc());
+      if (!elapsed.isNegative && elapsed < const Duration(days: 1)) return;
     }
-
-    for (var transaction in transactions) {
-      DateTime lastTransactionDate;
-
+    try {
+      _dailyCheckInstant = now;
       try {
-        lastTransactionDate = await _getLastRecurringTransactionInsertion(
-          transaction.id ?? 0,
-        );
-      } catch (e) {
-        lastTransactionDate = transaction.fromDate;
+        await checkRecurringTransactions();
+      } finally {
+        _dailyCheckInstant = null;
       }
-
-      String entity = transaction.recurrency.entity;
-      int entityAmt = transaction.recurrency.amount;
-
+      _retryDailyCheck = true;
       try {
-        if (entityAmt == 0) {
-          throw Exception('No amount provided for entity "$entity"');
+        final saved = await prefs.setString(
+          _lastCheckKey,
+          now.toUtc().toIso8601String(),
+        );
+        if (!saved) {
+          throw StateError('Recurring transaction check marker was not saved');
         }
+      } catch (_) {
+        // SharedPreferences updates its memory cache before the platform write completes.
+        await prefs.reload();
+        rethrow;
+      }
+      _retryDailyCheck = false;
+    } catch (_) {
+      _retryDailyCheck = true;
+      rethrow;
+    }
+  }
 
-        await populateRecurringTransaction(
+  Future<void> checkRecurringTransactions() =>
+      _checkRecurringTransactionsAt(_dailyCheckInstant ?? _clock());
+
+  Future<void> _checkRecurringTransactionsAt(DateTime now) async {
+    final transactions = await selectAllActive(now: now);
+    final db = await _sossoldiDB.database;
+    for (final transaction in transactions) {
+      await db.transaction((txn) async {
+        final id = transaction.id;
+        if (id == null) {
+          throw StateError('No recurring transaction ID provided');
+        }
+        final lastTransactionDate =
+            await _getLastRecurringTransactionInsertion(txn, id) ??
+            transaction.fromDate;
+        final entity = transaction.recurrency.entity;
+        final entityAmount = transaction.recurrency.amount;
+        if (entityAmount <= 0) {
+          throw StateError(
+            'No positive recurrence amount provided for entity "$entity"',
+          );
+        }
+        await _populateRecurringTransaction(
+          txn,
           entity,
           lastTransactionDate,
           transaction,
-          entityAmt,
+          entityAmount,
+          now,
         );
-      } catch (e) {
-        dev.log('$e');
-      }
+      });
     }
   }
 
-  Future<DateTime> _getLastRecurringTransactionInsertion(int tid) async {
-    if (tid == 0) {
-      throw Exception('No transaction ID provided');
-    }
-
-    final db = await _sossoldiDB.database;
-
+  Future<DateTime?> _getLastRecurringTransactionInsertion(
+    DatabaseExecutor db,
+    int tid,
+  ) async {
     final result = await db.query(
       transactionTable,
       orderBy: '${TransactionFields.date} DESC',
@@ -183,11 +218,7 @@ class RecurringTransactionRepository {
       whereArgs: [tid],
       limit: 1,
     );
-
-    if (result.isEmpty) {
-      throw Exception('No transaction found for ID $tid');
-    }
-
+    if (result.isEmpty) return null;
     return Transaction.fromJson(result.first).date;
   }
 
@@ -195,13 +226,36 @@ class RecurringTransactionRepository {
     String scope,
     DateTime lastTransactionDate,
     RecurringTransaction transaction,
-    int amount,
-  ) async {
+    int amount, {
+    DateTime? now,
+  }) async {
     if (amount == 0) {
       throw Exception('No amount provided for entity "$scope"');
     }
 
-    DateTime now = DateTime.now();
+    final db = await _sossoldiDB.database;
+    final currentTime = now ?? _clock();
+    await db.transaction(
+      (txn) => _populateRecurringTransaction(
+        txn,
+        scope,
+        lastTransactionDate,
+        transaction,
+        amount,
+        currentTime,
+      ),
+    );
+  }
+
+  Future<void> _populateRecurringTransaction(
+    DatabaseExecutor db,
+    String scope,
+    DateTime lastTransactionDate,
+    RecurringTransaction transaction,
+    int amount,
+    DateTime currentTime,
+  ) async {
+    if (amount <= 0) throw StateError('No positive recurrence amount provided');
 
     // create a list to store the months
     List<DateTime> transactions2Add = [];
@@ -211,12 +265,13 @@ class RecurringTransactionRepository {
 
     switch (scope) {
       case 'days':
-        periods = (now.difference(lastTransactionDate).inDays / amount).floor();
+        periods = (currentTime.difference(lastTransactionDate).inDays / amount)
+            .floor();
         break;
       case 'months':
         periods =
-            (((now.year - lastTransactionDate.year) * 12 +
-                        now.month -
+            (((currentTime.year - lastTransactionDate.year) * 12 +
+                        currentTime.month -
                         lastTransactionDate.month) /
                     amount)
                 .floor();
@@ -262,7 +317,7 @@ class RecurringTransactionRepository {
       }
 
       if ((transaction.toDate?.isAfter(lastTransactionDate) ?? true) &&
-          lastTransactionDate.isBefore(DateTime.now())) {
+          lastTransactionDate.isBefore(currentTime)) {
         transactions2Add.add(lastTransactionDate);
       }
     }
@@ -278,13 +333,23 @@ class RecurringTransactionRepository {
         idBankAccount: transaction.idBankAccount,
         recurring: true,
         idRecurringTransaction: transaction.id,
-        createdAt: DateTime.now(),
-        updatedAt: DateTime.now(),
+        createdAt: currentTime,
+        updatedAt: currentTime,
       );
-      await TransactionsRepository(database: _sossoldiDB).insert(addTr);
+      await db.insert(transactionTable, addTr.toJson());
+      final changed = await db.rawQuery('SELECT changes() AS affected');
+      if (changed.single['affected'] != 1) {
+        throw StateError('Recurring movement was not inserted');
+      }
     }
 
     // update the last insertion date
-    await updateItem(transaction.copy(lastInsertion: now));
+    final changed = await db.update(
+      recurringTransactionTable,
+      transaction.copy(lastInsertion: currentTime).toJson(),
+      where: '${RecurringTransactionFields.id} = ?',
+      whereArgs: [transaction.id],
+    );
+    if (changed != 1) throw StateError('Recurring progress was not updated');
   }
 }
