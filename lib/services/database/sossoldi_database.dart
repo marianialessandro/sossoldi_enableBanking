@@ -162,9 +162,16 @@ class SossoldiDatabase {
       // Group rows by table
       Map<String, List<List<dynamic>>> tableData = {};
       for (int i = 1; i < rows.length; i++) {
+        if (rows[i].every((value) => value.toString().trim().isEmpty)) {
+          continue;
+        }
         final String tableName = rows[i][tableNameIndex].toString();
         tableData.putIfAbsent(tableName, () => [headers]);
         tableData[tableName]!.add(rows[i]);
+      }
+
+      if (tableData.isEmpty) {
+        throw const FormatException('CSV file contains no data rows');
       }
 
       // Import each table's data
@@ -218,7 +225,7 @@ class SossoldiDatabase {
             results[tableName] = true;
           } catch (e) {
             dev.log('Error importing table $tableName: $e');
-            results[tableName] = false;
+            throw Exception('Failed to import table $tableName: $e');
           }
         }
       });
