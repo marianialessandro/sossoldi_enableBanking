@@ -15,20 +15,27 @@ void main() {
     late SossoldiDatabase sossoldiDatabase;
     late ProviderContainer container;
     late RecurringTransactionRepository repository;
+    final now = DateTime.utc(2032, 4, 1, 12);
 
     setUpAll(() async {
       sqflite_ffi.sqfliteFfiInit();
       sqflite_ffi.databaseFactory = sqflite_ffi.databaseFactoryFfi;
       sossoldiDatabase = SossoldiDatabase(dbName: 'test.db');
       await sossoldiDatabase.database;
-      repository = RecurringTransactionRepository(database: sossoldiDatabase);
+      repository = RecurringTransactionRepository(
+        database: sossoldiDatabase,
+        clock: () => now,
+      );
     });
 
     setUp(() async {
       await sossoldiDatabase.clearDatabase();
       await sossoldiDatabase.fillDemoData(countOfGeneratedTransaction: 100);
       container = ProviderContainer(
-        overrides: [databaseProvider.overrideWithValue(sossoldiDatabase)],
+        overrides: [
+          databaseProvider.overrideWithValue(sossoldiDatabase),
+          recurringTransactionRepositoryProvider.overrideWithValue(repository),
+        ],
       );
     });
 

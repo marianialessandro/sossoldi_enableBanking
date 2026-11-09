@@ -9,13 +9,17 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart' as sqflite_ffi;
 void main() {
   late SossoldiDatabase sossoldiDatabase;
   late RecurringTransactionRepository repository;
+  final now = DateTime.utc(2032, 4, 1, 12);
 
   setUpAll(() async {
     sqflite_ffi.sqfliteFfiInit();
     sqflite_ffi.databaseFactory = sqflite_ffi.databaseFactoryFfi;
     sossoldiDatabase = SossoldiDatabase(dbName: 'recurring_check_test.db');
     await sossoldiDatabase.database;
-    repository = RecurringTransactionRepository(database: sossoldiDatabase);
+    repository = RecurringTransactionRepository(
+      database: sossoldiDatabase,
+      clock: () => now,
+    );
   });
 
   setUp(() => sossoldiDatabase.clearDatabase());
@@ -23,7 +27,6 @@ void main() {
   tearDownAll(() => sossoldiDatabase.close());
 
   Future<RecurringTransaction> insertRent() async {
-    final now = DateTime.now();
     final recurring = await repository.insert(
       RecurringTransaction(
         fromDate: DateTime(now.year, now.month - 3, 1),
@@ -67,7 +70,7 @@ void main() {
 
   test('dailyCheck runs at most once a day', () async {
     SharedPreferences.setMockInitialValues({
-      'last_recurring_transactions_check': DateTime.now()
+      'last_recurring_transactions_check': now
           .subtract(const Duration(hours: 1))
           .toIso8601String(),
     });

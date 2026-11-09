@@ -38,6 +38,9 @@ class _CreateTransactionPage extends ConsumerState<CreateTransactionPage> {
   final TextEditingController noteController = TextEditingController();
   bool recurrencyEditingPermitted = true;
   bool _isSaveEnabled = false;
+  bool _isSubmitting = false;
+  bool _saveCompleted = false;
+  String? _saveError;
   CategoryTransaction? _suggestedCategory;
   String? _suggestedLabel;
 
@@ -153,80 +156,101 @@ class _CreateTransactionPage extends ConsumerState<CreateTransactionPage> {
     ref.read(selectedCategoryProvider.notifier).setCategory(category);
   }
 
-  void _refreshAccountAndNavigateBack() async {
-    ref
-        .read(accountsProvider.notifier)
-        .refreshAccount(ref.read(selectedBankAccountProvider)!)
-        .whenComplete(() {
-          if (mounted) Navigator.of(context).pop();
-        });
+  Future<void> _refreshAccountAndNavigateBack() async {
+    if (!mounted) return;
+    final route = ModalRoute.of(context);
+    if (route != null && !route.isCurrent) return;
+    final account = ref.read(selectedBankAccountProvider);
+    var refreshFailed = false;
+    try {
+      if (account != null) {
+        await ref.read(accountsProvider.notifier).refreshAccount(account);
+      }
+    } catch (_) {
+      refreshFailed = true;
+    }
+    if (!mounted || (route != null && !route.isCurrent)) return;
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    Navigator.of(context).pop();
+    if (refreshFailed) {
+      messenger?.showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Transaction saved. Some totals could not be refreshed.',
+          ),
+        ),
+      );
+    }
   }
 
-  void _createOrUpdateTransaction() async {
-    final selectedType = ref.read(selectedTransactionTypeProvider);
-
+  Future<void> _createOrUpdateTransaction() async {
+    if (_isSubmitting) return;
+    if (_saveCompleted) {
+      await _refreshAccountAndNavigateBack();
+      return;
+    }
     final cleanAmount = getCleanAmountString();
-
-    // Check that an amount has been provided
-    if (cleanAmount != '') {
-      if (widget.transaction != null) {
-        // if the original transaction is not recurrent, but user sets a recurrency, add the corrispondent record and edit the original transaction
-        if (ref.read(selectedRecurringPayProvider) &&
-            !widget.transaction!.recurring) {
-          await ref
-              .read(recurringTransactionsProvider.notifier)
-              .create(cleanAmount.toNum(), noteController.text, selectedType)
-              .then((value) async {
-                if (value != null) {
-                  await ref
-                      .read(transactionsProvider.notifier)
-                      .updateTransaction(
-                        widget.transaction!,
-                        cleanAmount.toNum(),
-                        noteController.text,
-                        value.id,
-                      )
-                      .whenComplete(() => _refreshAccountAndNavigateBack());
-                }
-              });
-        } else {
-          await ref
-              .read(transactionsProvider.notifier)
-              .updateTransaction(
-                widget.transaction!,
-                cleanAmount.toNum(),
-                noteController.text,
-                widget.transaction!.idRecurringTransaction,
-              )
-              .whenComplete(() => _refreshAccountAndNavigateBack());
-        }
-      } else {
-        if (selectedType == TransactionType.transfer) {
-          if (ref.read(bankAccountTransferProvider) != null) {
-            await ref
-                .read(transactionsProvider.notifier)
-                .create(cleanAmount.toNum(), noteController.text)
-                .whenComplete(() => _refreshAccountAndNavigateBack());
-          }
-        } else {
-          // It's an income or an expense
-          if (ref.read(selectedCategoryProvider) != null) {
-            if (ref.read(selectedRecurringPayProvider)) {
+    if (cleanAmount.isEmpty) return;
+    FocusManager.instance.primaryFocus?.unfocus();
+    setState(() {
+      _isSubmitting = true;
+      _saveError = null;
+    });
+    var saved = false;
+    try {
+      final type = ref.read(selectedTransactionTypeProvider);
+      final recurring =
+          type != TransactionType.transfer &&
+          ref.read(selectedRecurringPayProvider);
+      final original = widget.transaction;
+      if (original != null) {
+        if (recurring && !original.recurring) {
+          saved =
               await ref
                   .read(recurringTransactionsProvider.notifier)
                   .create(
                     cleanAmount.toNum(),
                     noteController.text,
-                    selectedType,
-                  );
-            } else {
-              await ref
-                  .read(transactionsProvider.notifier)
-                  .create(cleanAmount.toNum(), noteController.text);
-            }
-            _refreshAccountAndNavigateBack();
-          }
+                    type,
+                    existingTransaction: original,
+                  ) !=
+              null;
+        } else {
+          saved = await ref
+              .read(transactionsProvider.notifier)
+              .updateWithResult(
+                original,
+                cleanAmount.toNum(),
+                noteController.text,
+                recurringTransactionId: original.idRecurringTransaction,
+              );
         }
+      } else if (recurring && type != TransactionType.transfer) {
+        saved =
+            await ref
+                .read(recurringTransactionsProvider.notifier)
+                .create(cleanAmount.toNum(), noteController.text, type) !=
+            null;
+      } else {
+        saved = await ref
+            .read(transactionsProvider.notifier)
+            .createWithResult(cleanAmount.toNum(), noteController.text);
+      }
+      if (saved) {
+        _saveCompleted = true;
+        await _refreshAccountAndNavigateBack();
+      }
+    } catch (_) {
+      // A failed write must leave the user's form and draft available for retry.
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSubmitting = false;
+          if (!saved) {
+            _saveError =
+                'Could not save transaction. Your changes are still here. Try again.';
+          }
+        });
       }
     }
   }
@@ -281,19 +305,23 @@ class _CreateTransactionPage extends ConsumerState<CreateTransactionPage> {
                 size: 20,
                 color: Theme.of(context).colorScheme.primary,
               ),
-              onPressed: () => showDialog(
-                context: context,
-                builder: (_) => DuplicateTransactionDialog(
-                  transaction: widget.transaction!,
-                ),
-              ),
+              onPressed: _isSubmitting || _saveCompleted
+                  ? null
+                  : () => showDialog(
+                      context: context,
+                      builder: (_) => DuplicateTransactionDialog(
+                        transaction: widget.transaction!,
+                      ),
+                    ),
             ),
             IconButton(
               icon: Icon(
                 Icons.delete_outline,
                 color: Theme.of(context).colorScheme.error,
               ),
-              onPressed: _deleteTransaction,
+              onPressed: _isSubmitting || _saveCompleted
+                  ? null
+                  : _deleteTransaction,
             ),
           ],
         ],
@@ -324,175 +352,208 @@ class _CreateTransactionPage extends ConsumerState<CreateTransactionPage> {
               boxShadow: [defaultShadow],
               borderRadius: BorderRadius.circular(Sizes.borderRadius),
             ),
-            child: ElevatedButton(
-              onPressed: _isSaveEnabled ? _createOrUpdateTransaction : null,
-              child: Text(
-                widget.transaction != null
-                    ? "UPDATE TRANSACTION"
-                    : "ADD TRANSACTION",
-              ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (_saveError != null)
+                  Semantics(
+                    liveRegion: true,
+                    child: Padding(
+                      padding: const EdgeInsets.only(bottom: Sizes.sm),
+                      child: Text(
+                        _saveError!,
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.error,
+                        ),
+                      ),
+                    ),
+                  ),
+                if (_isSubmitting)
+                  Semantics(
+                    label: 'Saving transaction',
+                    child: const LinearProgressIndicator(),
+                  ),
+                ElevatedButton(
+                  onPressed:
+                      !_isSubmitting && (_isSaveEnabled || _saveCompleted)
+                      ? _createOrUpdateTransaction
+                      : null,
+                  child: Text(
+                    _saveCompleted
+                        ? 'DONE'
+                        : widget.transaction != null
+                        ? 'UPDATE TRANSACTION'
+                        : 'ADD TRANSACTION',
+                  ),
+                ),
+              ],
             ),
           ),
         ),
       ],
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.only(bottom: Sizes.md * 6),
-        child: Column(
-          children: [
-            AmountSection(
-              amountController,
-              typeEditingPermitted: canEditDateAndType,
-              amountEditingPermitted: canEditAmount,
-            ),
-            Container(
-              alignment: Alignment.centerLeft,
-              padding: const EdgeInsets.only(
-                left: Sizes.lg,
-                top: Sizes.xxl,
-                bottom: Sizes.sm,
+      body: AbsorbPointer(
+        absorbing: _isSubmitting || _saveCompleted,
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.only(bottom: Sizes.md * 6),
+          child: Column(
+            children: [
+              AmountSection(
+                amountController,
+                typeEditingPermitted: canEditDateAndType,
+                amountEditingPermitted: canEditAmount,
               ),
-              child: Text(
-                "DETAILS",
-                style: Theme.of(context).textTheme.labelLarge!.copyWith(
-                  color: Theme.of(context).colorScheme.primary,
+              Container(
+                alignment: Alignment.centerLeft,
+                padding: const EdgeInsets.only(
+                  left: Sizes.lg,
+                  top: Sizes.xxl,
+                  bottom: Sizes.sm,
+                ),
+                child: Text(
+                  "DETAILS",
+                  style: Theme.of(context).textTheme.labelLarge!.copyWith(
+                    color: Theme.of(context).colorScheme.primary,
+                  ),
                 ),
               ),
-            ),
-            Container(
-              color: Theme.of(context).colorScheme.surface,
-              child: Column(
-                children: [
-                  LabelListTile(noteController),
-                  const Divider(),
-                  if (selectedType != TransactionType.transfer) ...[
-                    if (canEditAccount)
-                      DetailsListTile(
-                        title: "Account",
-                        icon: Icons.account_balance_wallet,
-                        value: ref.watch(selectedBankAccountProvider)?.name,
-                        callback: () {
-                          FocusManager.instance.primaryFocus?.unfocus();
-                          showModalBottomSheet(
-                            context: context,
-                            clipBehavior: Clip.antiAliasWithSaveLayer,
-                            isScrollControlled: true,
-                            useSafeArea: true,
-                            shape: const RoundedRectangleBorder(
-                              borderRadius: BorderRadius.only(
-                                topLeft: Radius.circular(Sizes.borderRadius),
-                                topRight: Radius.circular(Sizes.borderRadius),
+              Container(
+                color: Theme.of(context).colorScheme.surface,
+                child: Column(
+                  children: [
+                    LabelListTile(noteController),
+                    const Divider(),
+                    if (selectedType != TransactionType.transfer) ...[
+                      if (canEditAccount)
+                        DetailsListTile(
+                          title: "Account",
+                          icon: Icons.account_balance_wallet,
+                          value: ref.watch(selectedBankAccountProvider)?.name,
+                          callback: () {
+                            FocusManager.instance.primaryFocus?.unfocus();
+                            showModalBottomSheet(
+                              context: context,
+                              clipBehavior: Clip.antiAliasWithSaveLayer,
+                              isScrollControlled: true,
+                              useSafeArea: true,
+                              shape: const RoundedRectangleBorder(
+                                borderRadius: BorderRadius.only(
+                                  topLeft: Radius.circular(Sizes.borderRadius),
+                                  topRight: Radius.circular(Sizes.borderRadius),
+                                ),
                               ),
-                            ),
-                            builder: (_) => DraggableScrollableSheet(
-                              expand: false,
-                              minChildSize: 0.5,
-                              initialChildSize: 0.7,
-                              maxChildSize: 0.9,
-                              builder: (_, controller) =>
-                                  AccountSelector(scrollController: controller),
-                            ),
-                          );
+                              builder: (_) => DraggableScrollableSheet(
+                                expand: false,
+                                minChildSize: 0.5,
+                                initialChildSize: 0.7,
+                                maxChildSize: 0.9,
+                                builder: (_, controller) => AccountSelector(
+                                  scrollController: controller,
+                                ),
+                              ),
+                            );
+                          },
+                        )
+                      else
+                        NonEditableDetailsListTile(
+                          title: "Account",
+                          icon: Icons.account_balance_wallet,
+                          value: ref.watch(selectedBankAccountProvider)?.name,
+                        ),
+                      const Divider(),
+                      if (canEditCategory) ...[
+                        DetailsListTile(
+                          title: "Category",
+                          icon: Icons.list_alt,
+                          value: ref.watch(selectedCategoryProvider)?.name,
+                          callback: () {
+                            FocusManager.instance.primaryFocus?.unfocus();
+                            showModalBottomSheet(
+                              context: context,
+                              clipBehavior: Clip.antiAliasWithSaveLayer,
+                              isScrollControlled: true,
+                              useSafeArea: true,
+                              shape: const RoundedRectangleBorder(
+                                borderRadius: BorderRadius.only(
+                                  topLeft: Radius.circular(Sizes.borderRadius),
+                                  topRight: Radius.circular(Sizes.borderRadius),
+                                ),
+                              ),
+                              builder: (_) => DraggableScrollableSheet(
+                                expand: false,
+                                minChildSize: 0.5,
+                                initialChildSize: 0.7,
+                                maxChildSize: 0.9,
+                                builder: (_, controller) => CategorySelector(
+                                  scrollController: controller,
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                        const Divider(),
+                      ],
+                    ],
+                    if (canEditDateAndType)
+                      DetailsListTile(
+                        title: "Date",
+                        icon: Icons.calendar_month,
+                        value: ref.watch(selectedDateProvider).formatEDMY(),
+                        callback: () async {
+                          FocusManager.instance.primaryFocus?.unfocus();
+                          if (Platform.isIOS) {
+                            showCupertinoModalPopup(
+                              context: context,
+                              builder: (_) => Container(
+                                height: 300,
+                                color: CupertinoDynamicColor.resolve(
+                                  CupertinoColors.secondarySystemBackground,
+                                  context,
+                                ),
+                                child: CupertinoDatePicker(
+                                  initialDateTime: ref.watch(
+                                    selectedDateProvider,
+                                  ),
+                                  minimumYear: 2015,
+                                  maximumYear: 2050,
+                                  mode: CupertinoDatePickerMode.date,
+                                  onDateTimeChanged: (date) => ref
+                                      .read(selectedDateProvider.notifier)
+                                      .setDate(date),
+                                ),
+                              ),
+                            );
+                          } else if (Platform.isAndroid) {
+                            final DateTime? pickedDate = await showDatePicker(
+                              context: context,
+                              initialDate: ref.watch(selectedDateProvider),
+                              firstDate: DateTime(2015),
+                              lastDate: DateTime(2050),
+                            );
+                            if (pickedDate != null) {
+                              ref
+                                  .read(selectedDateProvider.notifier)
+                                  .setDate(pickedDate);
+                            }
+                          }
                         },
                       )
                     else
                       NonEditableDetailsListTile(
-                        title: "Account",
-                        icon: Icons.account_balance_wallet,
-                        value: ref.watch(selectedBankAccountProvider)?.name,
+                        title: "Date",
+                        icon: Icons.calendar_month,
+                        value: ref.watch(selectedDateProvider).formatEDMY(),
                       ),
-                    const Divider(),
-                    if (canEditCategory) ...[
-                      DetailsListTile(
-                        title: "Category",
-                        icon: Icons.list_alt,
-                        value: ref.watch(selectedCategoryProvider)?.name,
-                        callback: () {
-                          FocusManager.instance.primaryFocus?.unfocus();
-                          showModalBottomSheet(
-                            context: context,
-                            clipBehavior: Clip.antiAliasWithSaveLayer,
-                            isScrollControlled: true,
-                            useSafeArea: true,
-                            shape: const RoundedRectangleBorder(
-                              borderRadius: BorderRadius.only(
-                                topLeft: Radius.circular(Sizes.borderRadius),
-                                topRight: Radius.circular(Sizes.borderRadius),
-                              ),
-                            ),
-                            builder: (_) => DraggableScrollableSheet(
-                              expand: false,
-                              minChildSize: 0.5,
-                              initialChildSize: 0.7,
-                              maxChildSize: 0.9,
-                              builder: (_, controller) => CategorySelector(
-                                scrollController: controller,
-                              ),
-                            ),
-                          );
-                        },
+                    if (canEditRecurring)
+                      RecurrenceListTile(
+                        recurrencyEditingPermitted: recurrencyEditingPermitted,
+                        selectedTransaction: widget.transaction,
                       ),
-                      const Divider(),
-                    ],
                   ],
-                  if (canEditDateAndType)
-                    DetailsListTile(
-                      title: "Date",
-                      icon: Icons.calendar_month,
-                      value: ref.watch(selectedDateProvider).formatEDMY(),
-                      callback: () async {
-                        FocusManager.instance.primaryFocus?.unfocus();
-                        if (Platform.isIOS) {
-                          showCupertinoModalPopup(
-                            context: context,
-                            builder: (_) => Container(
-                              height: 300,
-                              color: CupertinoDynamicColor.resolve(
-                                CupertinoColors.secondarySystemBackground,
-                                context,
-                              ),
-                              child: CupertinoDatePicker(
-                                initialDateTime: ref.watch(
-                                  selectedDateProvider,
-                                ),
-                                minimumYear: 2015,
-                                maximumYear: 2050,
-                                mode: CupertinoDatePickerMode.date,
-                                onDateTimeChanged: (date) => ref
-                                    .read(selectedDateProvider.notifier)
-                                    .setDate(date),
-                              ),
-                            ),
-                          );
-                        } else if (Platform.isAndroid) {
-                          final DateTime? pickedDate = await showDatePicker(
-                            context: context,
-                            initialDate: ref.watch(selectedDateProvider),
-                            firstDate: DateTime(2015),
-                            lastDate: DateTime(2050),
-                          );
-                          if (pickedDate != null) {
-                            ref
-                                .read(selectedDateProvider.notifier)
-                                .setDate(pickedDate);
-                          }
-                        }
-                      },
-                    )
-                  else
-                    NonEditableDetailsListTile(
-                      title: "Date",
-                      icon: Icons.calendar_month,
-                      value: ref.watch(selectedDateProvider).formatEDMY(),
-                    ),
-                  if (canEditRecurring)
-                    RecurrenceListTile(
-                      recurrencyEditingPermitted: recurrencyEditingPermitted,
-                      selectedTransaction: widget.transaction,
-                    ),
-                ],
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

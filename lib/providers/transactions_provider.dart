@@ -191,6 +191,23 @@ class TransactionsNotifier extends _$TransactionsNotifier {
     DateTime? date,
     TransactionType? type,
   }) async {
+    await createWithResult(
+      amount,
+      label,
+      account: account,
+      date: date,
+      type: type,
+    );
+  }
+
+  Future<bool> createWithResult(
+    num amount,
+    String label, {
+    BankAccount? account,
+    DateTime? date,
+    TransactionType? type,
+  }) async {
+    var persisted = false;
     state = const AsyncLoading();
 
     final TransactionType t = type ?? ref.read(selectedTransactionTypeProvider);
@@ -201,9 +218,9 @@ class TransactionsNotifier extends _$TransactionsNotifier {
       type: t,
       note: label,
       idBankAccount: (account ?? ref.read(selectedBankAccountProvider))!.id!,
-      idBankAccountTransfer: account != null
-          ? null
-          : ref.read(bankAccountTransferProvider)?.id,
+      idBankAccountTransfer: account == null && t == TransactionType.transfer
+          ? ref.read(bankAccountTransferProvider)?.id
+          : null,
       idCategory: account != null || t == TransactionType.transfer
           ? null
           : ref.read(selectedCategoryProvider)?.id,
@@ -212,10 +229,13 @@ class TransactionsNotifier extends _$TransactionsNotifier {
           : ref.read(selectedRecurringPayProvider),
     );
 
-    state = await AsyncValue.guard(() async {
+    final outcome = await AsyncValue.guard(() async {
       await ref.read(transactionsRepositoryProvider).insert(transaction);
+      persisted = true;
       return await _getTransactions();
     });
+    if (ref.mounted) state = outcome;
+    return persisted;
   }
 
   Future<Transaction?> duplicateTransaction(Transaction transaction) async {
@@ -242,6 +262,21 @@ class TransactionsNotifier extends _$TransactionsNotifier {
     String label, [
     int? recurringTransactionId,
   ]) async {
+    await updateWithResult(
+      transaction,
+      amount,
+      label,
+      recurringTransactionId: recurringTransactionId,
+    );
+  }
+
+  Future<bool> updateWithResult(
+    Transaction transaction,
+    num amount,
+    String label, {
+    int? recurringTransactionId,
+  }) async {
+    var persisted = false;
     final type = ref.read(selectedTransactionTypeProvider);
     final date = ref.read(selectedDateProvider);
     final bankAccount = ref.read(selectedBankAccountProvider)!;
@@ -254,19 +289,25 @@ class TransactionsNotifier extends _$TransactionsNotifier {
       type: type,
       note: label,
       idBankAccount: bankAccount.id!,
-      idBankAccountTransfer: bankAccountTransfer?.id,
-      idCategory: category?.id,
+      idBankAccountTransfer: type == TransactionType.transfer
+          ? bankAccountTransfer?.id
+          : null,
+      idCategory: type == TransactionType.transfer ? null : category?.id,
       idRecurringTransaction: recurringTransactionId,
       recurring: recurringTransactionId != null ? true : false,
     );
 
     state = const AsyncLoading();
-    state = await AsyncValue.guard(() async {
-      await ref
+    final outcome = await AsyncValue.guard(() async {
+      final changed = await ref
           .read(transactionsRepositoryProvider)
           .updateItem(transactionCopy);
+      if (changed != 1) throw StateError('Transaction no longer exists');
+      persisted = true;
       return await _getTransactions();
     });
+    if (ref.mounted) state = outcome;
+    return persisted;
   }
 
   Future<void> transactionSelect(Transaction transaction) async {

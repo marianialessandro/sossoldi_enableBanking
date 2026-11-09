@@ -136,12 +136,12 @@ class Transaction extends BaseEntity {
     DateTime? date,
     num? amount,
     TransactionType? type,
-    String? note,
-    int? idCategory,
+    Object? note = _unset,
+    Object? idCategory = _unset,
     int? idBankAccount,
-    int? idBankAccountTransfer,
+    Object? idBankAccountTransfer = _unset,
     bool? recurring,
-    int? idRecurringTransaction,
+    Object? idRecurringTransaction = _unset,
     DateTime? createdAt,
     DateTime? updatedAt,
   }) => Transaction(
@@ -150,13 +150,16 @@ class Transaction extends BaseEntity {
     date: date ?? this.date,
     amount: amount ?? this.amount,
     type: type ?? this.type,
-    note: note ?? this.note,
-    idCategory: idCategory ?? this.idCategory,
+    note: note == _unset ? this.note : note as String?,
+    idCategory: idCategory == _unset ? this.idCategory : idCategory as int?,
     idBankAccount: idBankAccount ?? this.idBankAccount,
-    idBankAccountTransfer: idBankAccountTransfer ?? this.idBankAccountTransfer,
+    idBankAccountTransfer: idBankAccountTransfer == _unset
+        ? this.idBankAccountTransfer
+        : idBankAccountTransfer as int?,
     recurring: recurring ?? this.recurring,
-    idRecurringTransaction:
-        idRecurringTransaction ?? this.idRecurringTransaction,
+    idRecurringTransaction: idRecurringTransaction == _unset
+        ? this.idRecurringTransaction
+        : idRecurringTransaction as int?,
     createdAt: createdAt ?? this.createdAt,
     updatedAt: updatedAt ?? this.updatedAt,
   );

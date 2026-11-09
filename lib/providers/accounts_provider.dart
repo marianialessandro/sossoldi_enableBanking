@@ -62,17 +62,31 @@ class FilterAccount extends _$FilterAccount {
 
 @Riverpod(keepAlive: true)
 class Accounts extends _$Accounts {
+  Object? _accountsReadToken;
+  Future<List<BankAccount>>? _latestAccountsRead;
   @override
   Future<List<BankAccount>> build() async {
-    final accounts = await _getAccounts();
-    ref.read(mainAccountProvider.notifier).state = accounts.firstWhereOrNull(
-      (account) => account.mainAccount,
-    );
-    return accounts;
+    return _getAccounts();
   }
 
-  Future<List<BankAccount>> _getAccounts() async {
+  Future<List<BankAccount>> _getAccounts() {
+    final token = Object();
+    _accountsReadToken = token;
+    final read = _readAccounts(token);
+    _latestAccountsRead = read;
+    return read;
+  }
+
+  Future<List<BankAccount>> _readAccounts(Object token) async {
     final accounts = await ref.read(accountRepositoryProvider).selectAll();
+    if (!identical(_accountsReadToken, token)) return _latestAccountsRead!;
+    if (ref.mounted) {
+      ref
+          .read(mainAccountProvider.notifier)
+          .setAccount(
+            accounts.firstWhereOrNull((account) => account.mainAccount),
+          );
+    }
     return accounts;
   }
 
@@ -129,9 +143,6 @@ class Accounts extends _$Accounts {
       }
       await ref.read(accountRepositoryProvider).updateItem(account);
 
-      if (account.mainAccount) {
-        ref.read(mainAccountProvider.notifier).state = account;
-      }
       ref.invalidate(dashboardProvider);
 
       return _getAccounts();
