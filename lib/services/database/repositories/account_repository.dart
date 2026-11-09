@@ -25,17 +25,20 @@ class AccountRepository {
   Future<BankAccount> insert(BankAccount item) async {
     final db = await _sossoldiDB.database;
 
-    await changeMainAccount(db, item);
-
-    final result = await db.rawQuery(
-      'SELECT COUNT(*) AS count FROM $bankAccountTable',
-    );
-    final nextOrder = result.first['count'] as int;
-
-    final newItem = item.copy(order: nextOrder);
-
-    final id = await db.insert(bankAccountTable, newItem.toJson());
-    return item.copy(id: id);
+    return db.transaction((txn) async {
+      await changeMainAccount(txn, item);
+      final result = await txn.rawQuery(
+        'SELECT COUNT(*) AS count FROM $bankAccountTable',
+      );
+      final nextOrder = result.first['count'] as int;
+      final newItem = item.copy(order: nextOrder);
+      final id = await txn.insert(bankAccountTable, newItem.toJson());
+      final changed = await txn.rawQuery('SELECT changes() AS affected');
+      if (changed.single['affected'] != 1) {
+        throw StateError('The account was not inserted');
+      }
+      return newItem.copy(id: id);
+    });
   }
 
   Future<BankAccount> selectById(int id) async {
@@ -127,30 +130,51 @@ class AccountRepository {
   Future<int> updateItem(BankAccount item) async {
     final db = await _sossoldiDB.database;
 
-    await changeMainAccount(db, item);
-
-    // You can use `rawUpdate` to write the query in SQL
-    return db.update(
-      bankAccountTable,
-      item.toJson(update: true),
-      where: '${BankAccountFields.id} = ?',
-      whereArgs: [item.id],
-    );
+    return db.transaction((txn) async {
+      final existing = await txn.query(
+        bankAccountTable,
+        columns: [BankAccountFields.id],
+        where: '${BankAccountFields.id} = ?',
+        whereArgs: [item.id],
+        limit: 1,
+      );
+      if (existing.isEmpty) return 0;
+      await changeMainAccount(txn, item);
+      final changed = await txn.update(
+        bankAccountTable,
+        item.toJson(update: true),
+        where: '${BankAccountFields.id} = ?',
+        whereArgs: [item.id],
+      );
+      if (changed != 1) throw StateError('The account was not updated');
+      return changed;
+    });
   }
 
-  // Check if the new item has mainAccount true, than find the previous main account and set it to false
-  Future<void> changeMainAccount(Database db, BankAccount item) async {
-    if (item.mainAccount) {
-      BankAccount? mainAccount = await selectMain();
-      if (mainAccount != null && mainAccount.id != item.id) {
-        mainAccount = mainAccount.copy(mainAccount: false);
-        await db.update(
-          bankAccountTable,
-          mainAccount.toJson(update: true),
-          where: '${BankAccountFields.id} = ?',
-          whereArgs: [mainAccount.id],
-        );
-      }
+  // Demote other main accounts through the same executor as the caller's write.
+  Future<void> changeMainAccount(DatabaseExecutor db, BankAccount item) async {
+    if (!item.mainAccount) return;
+    final where = item.id == null
+        ? '${BankAccountFields.mainAccount} = ?'
+        : '${BankAccountFields.mainAccount} = ? AND ${BankAccountFields.id} != ?';
+    final args = <Object?>[1, if (item.id != null) item.id];
+    await db.update(
+      bankAccountTable,
+      {
+        BankAccountFields.mainAccount: 0,
+        BankAccountFields.updatedAt: DateTime.now().toIso8601String(),
+      },
+      where: where,
+      whereArgs: args,
+    );
+    final remaining = await db.query(
+      bankAccountTable,
+      columns: [BankAccountFields.id],
+      where: where,
+      whereArgs: args,
+    );
+    if (remaining.isNotEmpty) {
+      throw StateError('The previous main account was not updated');
     }
   }
 
