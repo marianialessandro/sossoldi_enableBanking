@@ -9,7 +9,8 @@ import 'enable_banking_consent_mapper.dart';
 import 'enable_banking_errors.dart';
 import 'enable_banking_reference.dart';
 
-class EnableBankingConsentService implements BankConsentService {
+class EnableBankingConsentService
+    implements BankConsentService, BankConnectionReceiptSource {
   final EnableBankingApi _api;
   final _mapper = const EnableBankingConsentMapper();
 
@@ -44,15 +45,28 @@ class EnableBankingConsentService implements BankConsentService {
 
   @override
   Future<BankingConnectionResult> createConnection(String authorizationCode) =>
-      withEnableBankingErrors(() async {
-        if (authorizationCode.trim().isEmpty) {
-          throw const BankingException(
-            providerId: enableBankingId,
-            failure: BankingFailure.rejected,
-          );
-        }
-        return _mapper.created(await _api.createSession(authorizationCode));
-      });
+      createConnectionWithReceipt(authorizationCode, (_) async {});
+
+  @override
+  Future<BankingConnectionResult> createConnectionWithReceipt(
+    String authorizationCode,
+    Future<void> Function(BankingConnectionReference) onReference,
+  ) => withEnableBankingErrors(() async {
+    if (authorizationCode.trim().isEmpty) {
+      throw const BankingException(
+        providerId: enableBankingId,
+        failure: BankingFailure.rejected,
+      );
+    }
+    return _mapper.created(
+      await _api.createSession(
+        authorizationCode,
+        onReference: (id) => onReference(
+          BankingConnectionReference(providerId: enableBankingId, remoteId: id),
+        ),
+      ),
+    );
+  });
 
   @override
   Future<BankingConnection> getConnection(

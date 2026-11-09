@@ -1,39 +1,69 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
+import 'package:sossoldi/model/bank_account.dart';
 import 'package:sossoldi/model/bank_connection.dart';
 import 'package:sossoldi/services/banking/bank_authorization_context.dart';
 import 'package:sossoldi/services/banking/bank_consent_service.dart';
 import 'package:sossoldi/services/banking/bank_institution.dart';
 import 'package:sossoldi/services/banking/bank_institution_directory.dart';
 import 'package:sossoldi/services/banking/banking_authorization.dart';
+import 'package:sossoldi/services/banking/banking_account.dart';
 import 'package:sossoldi/services/banking/banking_connection.dart';
 import 'package:sossoldi/services/banking/banking_exception.dart';
 import 'package:sossoldi/services/banking/banking_reference.dart';
 import 'package:sossoldi/services/banking/lifecycle/bank_authorization_callback.dart';
+import 'package:sossoldi/services/banking/lifecycle/bank_authorization_coordinator.dart';
+import 'package:sossoldi/services/banking/lifecycle/bank_authorization_result.dart';
 import 'package:sossoldi/services/banking/lifecycle/bank_consent_lifecycle_service.dart';
 import 'package:sossoldi/services/banking/lifecycle/pending_bank_authorization.dart';
 import 'package:sossoldi/services/banking/lifecycle/pending_bank_authorization_store.dart';
 import 'package:sossoldi/services/database/migration_manager.dart';
 import 'package:sossoldi/services/database/repositories/bank_connection_repository.dart';
+import 'package:sossoldi/services/database/repositories/bank_reconciliation_exception.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 class _MemoryPendingStore implements PendingBankAuthorizationStore {
   PendingBankAuthorization? value;
+  Completer<void>? saveEntered;
+  Completer<void>? saveGate;
+  Completer<void>? readEntered;
+  Completer<void>? readGate;
 
   @override
   Future<void> clear() async => value = null;
 
   @override
-  Future<PendingBankAuthorization?> read() async => value;
+  Future<PendingBankAuthorization?> read() async {
+    final gate = readGate;
+    if (readEntered != null && !readEntered!.isCompleted) {
+      readEntered!.complete();
+    }
+    await gate?.future;
+    return value;
+  }
 
   @override
-  Future<void> save(PendingBankAuthorization pending) async => value = pending;
+  Future<void> save(PendingBankAuthorization pending) async {
+    saveEntered?.complete();
+    await saveGate?.future;
+    value = pending;
+  }
 }
 
 class _FakeApi implements BankConsentService, BankInstitutionDirectory {
   List<BankInstitution> aspsps = [];
+  Completer<void>? entered;
+  Completer<void>? startGate;
+  Completer<void>? createGate;
   Object? createFailure;
+  Object? startFailure;
   Object? deleteFailure;
   Object? getSessionFailure;
+  Completer<void>? getEntered;
+  Completer<void>? getGate;
+  Completer<void>? deleteEntered;
+  Completer<void>? deleteGate;
   DateTime validUntil = DateTime.utc(2026, 10, 1);
   BankingConnectionStatus sessionStatus = BankingConnectionStatus.active;
   int createCalls = 0;
@@ -52,6 +82,9 @@ class _FakeApi implements BankConsentService, BankInstitutionDirectory {
     BankingAuthorizationRequest request,
   ) async {
     startCalls++;
+    entered?.complete();
+    await startGate?.future;
+    if (startFailure case final failure?) throw failure;
     requestedValidUntil = request.validUntil;
     return BankingAuthorization(
       providerId: 'alternative',
@@ -74,6 +107,8 @@ class _FakeApi implements BankConsentService, BankInstitutionDirectory {
   @override
   Future<BankingConnectionResult> createConnection(String code) async {
     createCalls++;
+    entered?.complete();
+    await createGate?.future;
     if (createFailure case final failure?) throw failure;
     return BankingConnectionResult(
       connection: connection('session-new'),
@@ -86,14 +121,20 @@ class _FakeApi implements BankConsentService, BankInstitutionDirectory {
     BankingConnectionReference reference,
   ) async {
     expect(reference.providerId, 'alternative');
-    if (getSessionFailure case final failure?) throw failure;
-    return connection(reference.remoteId);
+    final response = connection(reference.remoteId);
+    final failure = getSessionFailure;
+    getEntered?.complete();
+    await getGate?.future;
+    if (failure != null) throw failure;
+    return response;
   }
 
   @override
   Future<void> revokeConnection(BankingConnectionReference reference) async {
     expect(reference.providerId, 'alternative');
     deleteCalls++;
+    deleteEntered?.complete();
+    await deleteGate?.future;
     if (deleteFailure case final failure?) throw failure;
   }
 }
@@ -122,6 +163,7 @@ void main() {
   );
   late _MemoryPendingStore pending;
   late _FakeApi api;
+  var credentialsRevision = 0;
   final now = DateTime.utc(2026, 9, 1, 12);
 
   setUpAll(() {
@@ -146,6 +188,7 @@ void main() {
     repository = BankConnectionRepository.withDatabase(db);
     pending = _MemoryPendingStore();
     api = _FakeApi();
+    credentialsRevision = 0;
     api.aspsps = [
       bank(
         name: 'Test Bank',
@@ -158,15 +201,785 @@ void main() {
 
   tearDown(() => db.close());
 
-  BankConsentLifecycleService service() => BankConsentLifecycleService(
-    consent: api,
-    institutions: api,
-    readContext: () async => context,
-    pendingStore: pending,
-    connections: repository,
-    clock: () => now,
-    callbackSupported: () => true,
+  BankConsentLifecycleService service({bool trackCredentials = false}) =>
+      BankConsentLifecycleService(
+        consent: api,
+        institutions: api,
+        readContext: () async => context,
+        pendingStore: pending,
+        connections: repository,
+        clock: () => now,
+        callbackSupported: () => true,
+        credentialRevision: trackCredentials ? () => credentialsRevision : null,
+      );
+
+  Future<BankConnection> stageForRecovery() async {
+    await service().startAuthorization(api.aspsps.single);
+    return (await service().completeCallback(
+      BankAuthorizationCallback(code: 'code', state: pending.value!.state),
+    )).connection;
+  }
+
+  test(
+    'RECOVERY owner captured synchronously cancels POST before pending',
+    () async {
+      api.entered = Completer<void>();
+      api.startGate = Completer<void>();
+      BankAuthorizationOwner? owner;
+      final first = service().startAuthorization(
+        bank(),
+        onOwner: (value) => owner = value,
+      );
+      expect(owner, isNotNull);
+      final rejected = expectLater(first, throwsA(isA<BankingException>()));
+      await api.entered!.future;
+      expect(pending.value, isNull);
+      expect(await service().cancelAuthorizationIfCurrent(owner!), isTrue);
+      api.startGate!.complete();
+      await rejected;
+      expect(pending.value, isNull);
+      expect(api.deleteCalls, 0);
+    },
   );
+
+  test(
+    'RECOVERY owner stale A cannot invalidate B without persisted pending',
+    () async {
+      api.entered = Completer<void>();
+      api.startGate = Completer<void>();
+      BankAuthorizationOwner? firstOwner;
+      final first = service().startAuthorization(
+        bank(),
+        onOwner: (value) => firstOwner = value,
+      );
+      final rejected = expectLater(first, throwsA(isA<BankingException>()));
+      await api.entered!.future;
+      expect(await service().cancelAuthorizationIfCurrent(firstOwner!), isTrue);
+      api.entered = null;
+      BankAuthorizationOwner? secondOwner;
+      final second = service().startAuthorization(
+        bank(name: 'Other Bank'),
+        onOwner: (value) => secondOwner = value,
+      );
+      final revision = pending.coordinator.revision;
+      expect(
+        await service().cancelAuthorizationIfCurrent(firstOwner!),
+        isFalse,
+      );
+      expect(pending.coordinator.revision, revision);
+      expect(identical(firstOwner, secondOwner), isFalse);
+      api.startGate!.complete();
+      await rejected;
+      await second;
+      expect(pending.value!.institutionName, 'Other Bank');
+    },
+  );
+
+  test(
+    'RECOVERY owner adopts persisted pending across lifecycle wrappers',
+    () async {
+      await service().startAuthorization(bank());
+      final owner = await service().captureAuthorizationOwner();
+      expect(owner, isNotNull);
+      expect(await service().cancelAuthorizationIfCurrent(owner!), isTrue);
+      expect(pending.value, isNull);
+      expect(await service().cancelAuthorizationIfCurrent(owner), isFalse);
+    },
+  );
+
+  test(
+    'RECOVERY owner cancellation during pending save rejects late save',
+    () async {
+      pending.saveEntered = Completer<void>();
+      pending.saveGate = Completer<void>();
+      BankAuthorizationOwner? owner;
+      final first = service().startAuthorization(
+        bank(),
+        onOwner: (value) => owner = value,
+      );
+      final rejected = expectLater(first, throwsA(isA<BankingException>()));
+      await pending.saveEntered!.future;
+      final cancelled = service().cancelAuthorizationIfCurrent(owner!);
+      await Future<void>.value();
+      pending.saveGate!.complete();
+      expect(await cancelled, isTrue);
+      await rejected;
+      expect(pending.value, isNull);
+    },
+  );
+
+  test(
+    'RECOVERY owner replacement pending has a different generation at the same revision',
+    () async {
+      await service().startAuthorization(bank());
+      final owner = (await service().captureAuthorizationOwner())!;
+      pending.value = PendingBankAuthorization.fromJson({
+        ...pending.value!.toJson(),
+        'state': 'replacement',
+        'authorization_id': 'replacement',
+      });
+      final replacement = (await service().captureAuthorizationOwner())!;
+      expect(replacement.sameGeneration(owner), isFalse);
+      final revision = pending.coordinator.revision;
+      expect(await service().cancelAuthorizationIfCurrent(owner), isFalse);
+      expect(pending.coordinator.revision, revision);
+      expect(pending.value!.state, 'replacement');
+    },
+  );
+
+  test(
+    'RECOVERY owner read suspended while B starts cannot invalidate B',
+    () async {
+      await service().startAuthorization(bank());
+      final owner = (await service().captureAuthorizationOwner())!;
+      pending.readEntered = Completer<void>();
+      final release = pending.readGate = Completer<void>();
+      final cancelled = service().cancelAuthorizationIfCurrent(owner);
+      await pending.readEntered!.future;
+      pending.readGate = null;
+      await service().cancelAuthorization();
+      await service().startAuthorization(bank(name: 'Other Bank'));
+      final revision = pending.coordinator.revision;
+      release.complete();
+      expect(await cancelled, isFalse);
+      expect(pending.coordinator.revision, revision);
+      expect(pending.value!.institutionName, 'Other Bank');
+    },
+  );
+
+  test(
+    'RECOVERY owner callback in flight is invalidated and cleaned under its owner',
+    () async {
+      await service().startAuthorization(bank());
+      final owner = (await service().captureAuthorizationOwner())!;
+      api.entered = Completer<void>();
+      api.createGate = Completer<void>();
+      final callback = service().completeCallback(
+        BankAuthorizationCallback(
+          code: 'synthetic',
+          state: pending.value!.state,
+        ),
+      );
+      final rejected = expectLater(callback, throwsA(isA<BankingException>()));
+      await api.entered!.future;
+      expect(await service().cancelAuthorizationIfCurrent(owner), isTrue);
+      api.createGate!.complete();
+      await rejected;
+      expect(await repository.selectAll(), isEmpty);
+      expect(pending.value, isNull);
+      expect(api.deleteCalls, 1);
+    },
+  );
+
+  test(
+    'duplicate in-flight callbacks share the exact result across wrappers',
+    () async {
+      await service().startAuthorization(api.aspsps.single);
+      api.entered = Completer<void>();
+      api.createGate = Completer<void>();
+      final callback = BankAuthorizationCallback(
+        code: 'code',
+        state: pending.value!.state,
+      );
+      final first = service().completeCallback(callback);
+      await api.entered!.future;
+      final duplicate = service().completeCallback(callback);
+      expect(identical(first, duplicate), isTrue);
+      api.createGate!.complete();
+      final results = await Future.wait([first, duplicate]);
+      expect(identical(results.first, results.last), isTrue);
+      expect(api.createCalls, 1);
+    },
+  );
+
+  test(
+    'RECOVERY owner captured from pending save remains cancellable',
+    () async {
+      pending.saveEntered = Completer<void>();
+      pending.saveGate = Completer<void>();
+      final first = service().startAuthorization(bank());
+      final rejected = expectLater(first, throwsA(isA<BankingException>()));
+      await pending.saveEntered!.future;
+      final owner = (await service().captureAuthorizationOwner())!;
+      final cancelled = service().cancelAuthorizationIfCurrent(owner);
+      await Future<void>.value();
+      pending.saveGate!.complete();
+      expect(await cancelled, isTrue);
+      await rejected;
+      expect(pending.value, isNull);
+    },
+  );
+
+  test(
+    'RECOVERY owner expiry creates new generation even without revision change',
+    () async {
+      await service().startAuthorization(bank());
+      final owner = (await service().captureAuthorizationOwner())!;
+      pending.value = PendingBankAuthorization.fromJson({
+        ...pending.value!.toJson(),
+        'expires_at': now
+            .subtract(const Duration(seconds: 1))
+            .toIso8601String(),
+      });
+      final expired = (await service().captureAuthorizationOwner())!;
+      final next = await service().startAuthorization(bank());
+      expect(next.owner!.sameGeneration(expired), isFalse);
+      expect(next.owner!.sameGeneration(owner), isFalse);
+      expect(await service().cancelAuthorizationIfCurrent(expired), isFalse);
+      expect(pending.value, isNotNull);
+      expect(api.startCalls, 2);
+    },
+  );
+
+  PendingBankAuthorization replacementPending(
+    PendingBankAuthorization original,
+  ) => PendingBankAuthorization.fromJson({
+    ...original.toJson(),
+    'state': 'new-state',
+    'authorization_id': 'new-auth',
+  });
+
+  test(
+    'A30 repeated PENDING and timeout keep one session until ACTIVE',
+    () async {
+      final staged = await stageForRecovery();
+      final saved = pending.value;
+      api.sessionStatus = BankingConnectionStatus.pending;
+      expect(await service().resumeAwaitingImports(), isEmpty);
+      expect(await service().resumeAwaitingImports(), isEmpty);
+      expect(
+        (await repository.selectById(staged.id!)).sameLifecycle(staged),
+        isTrue,
+      );
+      expect(pending.value, saved);
+      api.getSessionFailure = const BankingException(
+        providerId: 'alternative',
+        failure: BankingFailure.unavailable,
+      );
+      await expectLater(
+        service().resumeAwaitingImports(),
+        throwsA(isA<BankingException>()),
+      );
+      expect(pending.value, saved);
+      api.getSessionFailure = null;
+      api.sessionStatus = BankingConnectionStatus.active;
+      expect(
+        (await service().resumeAwaitingImports()).single.connection
+            .sameLifecycle(staged),
+        isTrue,
+      );
+      expect(
+        (await service().resumeAwaitingImports()).single.connection.id,
+        staged.id,
+      );
+      expect(api.createCalls, 1);
+    },
+  );
+
+  for (final outcome in ['active', 'terminal', 'error']) {
+    test(
+      'A18 late resume $outcome preserves replacement staging and pending',
+      () async {
+        final staged = await stageForRecovery();
+        api.sessionStatus = outcome == 'terminal'
+            ? BankingConnectionStatus.closed
+            : BankingConnectionStatus.active;
+        if (outcome == 'error') {
+          api.getSessionFailure = const BankingException(
+            providerId: 'alternative',
+            failure: BankingFailure.connectionRevoked,
+          );
+        }
+        api.getEntered = Completer<void>();
+        api.getGate = Completer<void>();
+        final operation = service().resumeAwaitingImports();
+        await api.getEntered!.future;
+        final replacement = staged.copy(
+          pendingRemoteConnectionId: 'new-session',
+          pendingAuthorizationId: 'new-auth',
+        );
+        await db.update(
+          bankConnectionTable,
+          replacement.toJson(update: true, clock: now),
+          where: 'id = ?',
+          whereArgs: [staged.id],
+        );
+        final next = replacementPending(pending.value!);
+        pending.value = next;
+        api.getGate!.complete();
+        expect(await operation, isEmpty);
+        expect(
+          (await repository.selectById(staged.id!)).sameLifecycle(replacement),
+          isTrue,
+        );
+        expect(pending.value, next);
+      },
+    );
+  }
+
+  for (final failure in [false, true]) {
+    test(
+      'A17 late refresh failure=$failure cannot revive disconnected data',
+      () async {
+        final active = await repository.insert(
+          BankConnection(
+            providerId: 'alternative',
+            institutionName: 'Test Bank',
+            institutionCountry: 'IT',
+            applicationId: 'app-id',
+            remoteConnectionId: 'active',
+            validUntil: now.add(const Duration(days: 1)),
+            status: BankConnectionStatus.active,
+          ),
+        );
+        if (failure) {
+          api.getSessionFailure = const BankingException(
+            providerId: 'alternative',
+            failure: BankingFailure.connectionExpired,
+          );
+        }
+        api.getEntered = Completer<void>();
+        api.getGate = Completer<void>();
+        final operation = service().refreshConnectionState(active);
+        await api.getEntered!.future;
+        await service().disconnectLocally(active);
+        api.getGate!.complete();
+        expect(await operation, BankConnectionStatus.disconnected);
+        expect(
+          (await repository.selectById(active.id!)).status,
+          BankConnectionStatus.disconnected,
+        );
+      },
+    );
+    test(
+      'late revoke failure=$failure preserves replacement and pending',
+      () async {
+        final staged = await stageForRecovery();
+        api.deleteEntered = Completer<void>();
+        api.deleteGate = Completer<void>();
+        if (failure) {
+          api.deleteFailure = const BankingException(
+            providerId: 'alternative',
+            failure: BankingFailure.unavailable,
+          );
+        }
+        final operation = service().revoke(staged);
+        final rejected = expectLater(
+          operation,
+          throwsA(isA<BankingException>()),
+        );
+        await api.deleteEntered!.future;
+        final replacement = staged.copy(
+          pendingRemoteConnectionId: 'new-session',
+          pendingAuthorizationId: 'new-auth',
+        );
+        await db.update(
+          bankConnectionTable,
+          replacement.toJson(update: true, clock: now),
+          where: 'id = ?',
+          whereArgs: [staged.id],
+        );
+        final next = replacementPending(pending.value!);
+        pending.value = next;
+        api.deleteGate!.complete();
+        await rejected;
+        expect(
+          (await repository.selectById(staged.id!)).sameLifecycle(replacement),
+          isTrue,
+        );
+        expect(pending.value, next);
+        expect(api.deleteCalls, 1);
+      },
+    );
+  }
+
+  for (final newer in [false, true]) {
+    test(
+      'A16 local disconnect clears only owned pending newer=$newer',
+      () async {
+        final staged = await stageForRecovery();
+        final expected = newer
+            ? replacementPending(pending.value!)
+            : pending.value;
+        pending.value = expected;
+        await service().disconnectLocally(staged);
+        expect(pending.value, newer ? expected : isNull);
+        expect(
+          (await repository.selectById(staged.id!)).status,
+          BankConnectionStatus.disconnected,
+        );
+        expect(api.deleteCalls, 0);
+      },
+    );
+  }
+
+  test(
+    'A29 lifecycle refuses missing or replaced selection snapshot',
+    () async {
+      final staged = await stageForRecovery();
+      await expectLater(
+        service().activateConnection(staged.id!, []),
+        throwsA(isA<BankingException>()),
+      );
+      await db.update(
+        bankConnectionTable,
+        {BankConnectionFields.pendingRemoteConnectionId: 'replacement'},
+        where: 'id = ?',
+        whereArgs: [staged.id],
+      );
+      await expectLater(
+        service().activateConnection(staged.id!, [], expectedStaging: staged),
+        throwsA(anything),
+      );
+      expect(
+        (await repository.selectById(staged.id!)).pendingRemoteConnectionId,
+        'replacement',
+      );
+    },
+  );
+
+  for (final selectionState in ['valid', 'expired', 'revoking', 'stale']) {
+    test('A14 A15 A29 actual selection snapshot $selectionState', () async {
+      var staged = await stageForRecovery();
+      if (selectionState == 'expired') {
+        await db.update(
+          bankConnectionTable,
+          {BankConnectionFields.pendingValidUntil: now.toIso8601String()},
+          where: 'id = ?',
+          whereArgs: [staged.id],
+        );
+        staged = await repository.selectById(staged.id!);
+      } else if (selectionState == 'revoking') {
+        staged = (await repository.markStatusIfCurrent(
+          staged,
+          BankConnectionStatus.revocationPending,
+          clock: () => now,
+        ))!;
+      } else if (selectionState == 'stale') {
+        await db.update(
+          bankConnectionTable,
+          {
+            BankConnectionFields.pendingRemoteConnectionId: 'replacement',
+            BankConnectionFields.pendingAuthorizationId: 'replacement-auth',
+          },
+          where: 'id = ?',
+          whereArgs: [staged.id],
+        );
+      }
+      final before = await db.query(bankConnectionTable);
+      final savedPending = pending.value;
+      final result = service().activateConnection(staged.id!, [
+        (
+          remote: BankingAccount(
+            reference: BankingAccountReference(
+              providerId: 'alternative',
+              remoteId: 'uid',
+              identityKeys: {'hash'},
+            ),
+            currency: 'EUR',
+          ),
+          newAccount: const BankAccount(
+            name: 'Selected',
+            symbol: 'wallet',
+            color: 1,
+            startingValue: 0,
+            active: true,
+            countNetWorth: true,
+            mainAccount: false,
+            order: 0,
+          ),
+        ),
+      ], expectedStaging: staged);
+      if (selectionState == 'valid') {
+        expect((await result).status, BankConnectionStatus.active);
+        expect(
+          (await db.query(bankAccountTable)).single['ebAccountUid'],
+          'uid',
+        );
+        expect(await db.query('bankAccountIdentity'), hasLength(1));
+        expect(pending.value, isNull);
+      } else {
+        await expectLater(result, throwsA(isA<BankReconciliationException>()));
+        expect(await db.query(bankConnectionTable), before);
+        expect(await db.query(bankAccountTable), isEmpty);
+        expect(await db.query('bankAccountIdentity'), isEmpty);
+        expect(pending.value, savedPending);
+      }
+    });
+  }
+
+  for (final terminal in [
+    BankingConnectionStatus.closed,
+    BankingConnectionStatus.revoked,
+  ]) {
+    test(
+      'A20 A31 terminal staged ${terminal.name} cannot import or resume',
+      () async {
+        final staged = await stageForRecovery();
+        api.sessionStatus = terminal;
+        expect(await service().resumeAwaitingImports(), isEmpty);
+        final stored = await repository.selectById(staged.id!);
+        expect(
+          stored.status,
+          anyOf(
+            BankConnectionStatus.reauthRequired,
+            BankConnectionStatus.revoked,
+          ),
+        );
+        expect(stored.pendingRemoteConnectionId, isNull);
+        expect(stored.pendingAuthorizationId, isNull);
+        expect(stored.pendingValidUntil, isNull);
+        expect(pending.value, isNull);
+        expect(await db.query(bankAccountTable), isEmpty);
+        expect(await service().resumeAwaitingImports(), isEmpty);
+        expect(api.createCalls, 1);
+      },
+    );
+  }
+
+  test('A09 two lifecycle instances share one start and state', () async {
+    api.entered = Completer<void>();
+    api.startGate = Completer<void>();
+    final firstService = service();
+    final secondService = service();
+    final first = firstService.startAuthorization(bank());
+    await api.entered!.future;
+    final second = secondService.startAuthorization(bank());
+    api.startGate!.complete();
+    final results = await Future.wait([first, second]);
+    expect(api.startCalls, 1);
+    expect(results[0].url, results[1].url);
+    expect(results[0].consentValidUntil, results[1].consentValidUntil);
+    await secondService.startAuthorization(bank());
+    expect(api.startCalls, 1);
+  });
+
+  test('A10 Cancel detaches A; its late result cannot overwrite B', () async {
+    api.entered = Completer<void>();
+    api.startGate = Completer<void>();
+    final first = service().startAuthorization(bank());
+    final rejected = expectLater(first, throwsA(isA<BankingException>()));
+    await api.entered!.future;
+    await service().cancelAuthorization();
+    final oldGate = api.startGate!;
+    api.startGate = null;
+    api.entered = null;
+    await service().startAuthorization(bank());
+    final savedB = pending.value!.toJson();
+    oldGate.complete();
+    await rejected;
+    expect(pending.value!.toJson(), savedB);
+    expect(api.startCalls, 2);
+  });
+
+  test('Cancel during pending save waits and removes only A', () async {
+    pending.saveEntered = Completer<void>();
+    pending.saveGate = Completer<void>();
+    final first = service().startAuthorization(bank());
+    final rejected = expectLater(first, throwsA(isA<BankingException>()));
+    await pending.saveEntered!.future;
+    final canceled = service().cancelAuthorization();
+    pending.saveGate!.complete();
+    await Future.wait([rejected, canceled]);
+    expect(pending.value, isNull);
+  });
+
+  for (final replace in [false, true]) {
+    test(
+      'A11/A12 obsolete callback ${replace ? 'changed app' : 'Cancel'} cannot stage',
+      () async {
+        await service().startAuthorization(bank());
+        api.entered = Completer<void>();
+        api.createGate = Completer<void>();
+        final callback = service().completeCallback(
+          BankAuthorizationCallback(
+            state: pending.value!.state,
+            code: 'synthetic',
+          ),
+        );
+        final rejected = expectLater(
+          callback,
+          throwsA(isA<ObsoleteBankAuthorizationException>()),
+        );
+        await api.entered!.future;
+        if (replace) {
+          context = const BankAuthorizationContext(
+            providerId: 'alternative',
+            applicationId: 'B',
+            redirectUri: 'sossoldi://eb-callback',
+          );
+        } else {
+          await service().cancelAuthorization();
+        }
+        api.createGate!.complete();
+        await rejected;
+        expect(await repository.selectAwaitingImport(), isEmpty);
+        expect(pending.value, isNull);
+        if (replace) {
+          expect(api.deleteCalls, 0);
+          expect(
+            pending.coordinator.unresolvedConnections.single.applicationId,
+            'app-id',
+          );
+        } else {
+          expect(api.deleteCalls, 1);
+        }
+      },
+    );
+  }
+
+  test('duplicate callbacks across instances exchange code once', () async {
+    await service().startAuthorization(bank());
+    final callback = BankAuthorizationCallback(
+      state: pending.value!.state,
+      code: 'synthetic',
+    );
+    final results = await Future.wait([
+      service().completeCallback(callback),
+      service().completeCallback(callback),
+    ]);
+    expect(api.createCalls, 1);
+    expect(results[0].connection.id, results[1].connection.id);
+  });
+
+  test('start failure releases the shared slot for retry', () async {
+    api.startFailure = const BankingException(
+      providerId: 'alternative',
+      failure: BankingFailure.unavailable,
+    );
+    await expectLater(
+      service().startAuthorization(bank()),
+      throwsA(isA<BankingException>()),
+    );
+    api.startFailure = null;
+    await service().startAuthorization(bank());
+    expect(api.startCalls, 2);
+  });
+
+  test(
+    'incompatible concurrent bank or app cannot join the shared start',
+    () async {
+      api.entered = Completer<void>();
+      api.startGate = Completer<void>();
+      final first = service().startAuthorization(bank());
+      await api.entered!.future;
+      await expectLater(
+        service().startAuthorization(bank(name: 'Other')),
+        throwsA(isA<BankingException>()),
+      );
+      context = const BankAuthorizationContext(
+        providerId: 'alternative',
+        applicationId: 'B',
+        redirectUri: 'sossoldi://eb-callback',
+      );
+      await expectLater(
+        service().startAuthorization(bank()),
+        throwsA(isA<BankingException>()),
+      );
+      context = const BankAuthorizationContext(
+        providerId: 'alternative',
+        applicationId: 'app-id',
+        redirectUri: 'sossoldi://eb-callback',
+      );
+      api.startGate!.complete();
+      await first;
+      expect(api.startCalls, 1);
+    },
+  );
+
+  test('callback A finishing after new pending B leaves B unchanged', () async {
+    await service().startAuthorization(bank());
+    api.entered = Completer<void>();
+    api.createGate = Completer<void>();
+    final result = service().completeCallback(
+      BankAuthorizationCallback(state: pending.value!.state, code: 'synthetic'),
+    );
+    final rejected = expectLater(
+      result,
+      throwsA(isA<ObsoleteBankAuthorizationException>()),
+    );
+    await api.entered!.future;
+    await service().cancelAuthorization();
+    api.entered = null;
+    await service().startAuthorization(bank());
+    final savedB = pending.value!.toJson();
+    api.createGate!.complete();
+    await rejected;
+    expect(pending.value!.toJson(), savedB);
+    expect(await repository.selectAwaitingImport(), isEmpty);
+  });
+
+  test(
+    'same-app credential rotation invalidates a retained lifecycle callback',
+    () async {
+      final lifecycle = service(trackCredentials: true);
+      await lifecycle.startAuthorization(bank());
+      api.entered = Completer<void>();
+      api.createGate = Completer<void>();
+      final result = lifecycle.completeCallback(
+        BankAuthorizationCallback(
+          state: pending.value!.state,
+          code: 'synthetic',
+        ),
+      );
+      final rejected = expectLater(
+        result,
+        throwsA(isA<ObsoleteBankAuthorizationException>()),
+      );
+      await api.entered!.future;
+      credentialsRevision++;
+      api.createGate!.complete();
+      await rejected;
+      expect(await repository.selectAwaitingImport(), isEmpty);
+      expect(api.deleteCalls, 0);
+      expect(pending.coordinator.unresolvedConnections, hasLength(1));
+    },
+  );
+
+  test(
+    'Cancel while staged pending save is suspended removes committed staging',
+    () async {
+      await service().startAuthorization(bank());
+      pending.saveEntered = Completer<void>();
+      pending.saveGate = Completer<void>();
+      final result = service().completeCallback(
+        BankAuthorizationCallback(
+          state: pending.value!.state,
+          code: 'synthetic',
+        ),
+      );
+      final rejected = expectLater(
+        result,
+        throwsA(isA<ObsoleteBankAuthorizationException>()),
+      );
+      await pending.saveEntered!.future;
+      final canceled = service().cancelAuthorization();
+      pending.saveGate!.complete();
+      await Future.wait([rejected, canceled]);
+      expect(await repository.selectAll(), isEmpty);
+      expect(pending.value, isNull);
+    },
+  );
+
+  test('SQLite staging rolls back when invalidated after insert', () async {
+    var checks = 0;
+    await expectLater(
+      repository.stageConnection(
+        providerId: 'alternative',
+        authorizationId: 'a',
+        applicationId: 'app-id',
+        institutionName: 'Test Bank',
+        institutionCountry: 'IT',
+        remoteConnectionId: 'remote',
+        validUntil: now.add(const Duration(days: 1)),
+        psuType: 'personal',
+        isAuthorizationCurrent: () => ++checks < 4,
+      ),
+      throwsA(anything),
+    );
+    expect(checks, 4);
+    expect(await repository.selectAll(), isEmpty);
+  });
 
   test('reconnect reloads metadata and clamps requested validity', () async {
     final connection = await repository.insert(
@@ -388,9 +1201,47 @@ void main() {
     expect(api.startCalls, 0);
   });
 
+  for (final offset in [-1, 0, 1]) {
+    test('CAL callback before at after pending expiry $offset', () async {
+      await service().startAuthorization(bank());
+      final original = pending.value!;
+      pending.value = PendingBankAuthorization.fromJson({
+        ...original.toJson(),
+        'expires_at': now
+            .subtract(Duration(microseconds: offset))
+            .toIso8601String(),
+      });
+      final callback = BankAuthorizationCallback(
+        code: 'synthetic-code',
+        state: original.state,
+      );
+      if (offset < 0) {
+        final result = await service().completeCallback(callback);
+        expect(result.connection.pendingRemoteConnectionId, isNotNull);
+        expect(api.createCalls, 1);
+        expect(await repository.selectAwaitingImport(), hasLength(1));
+      } else {
+        await expectLater(
+          service().completeCallback(callback),
+          throwsA(
+            isA<BankingException>().having(
+              (error) => error.failure,
+              'expiry at the shared UTC clock',
+              BankingFailure.connectionExpired,
+            ),
+          ),
+        );
+        expect(api.createCalls, 0);
+        expect(await repository.selectAll(), isEmpty);
+        expect(pending.value, isNull);
+      }
+    });
+  }
+
   test('expired and mismatched callbacks never exchange the code', () async {
     await service().startAuthorization(api.aspsps.single);
     final state = pending.value!.state;
+    final original = pending.value;
 
     await expectLater(
       () => service().completeCallback(
@@ -399,6 +1250,7 @@ void main() {
       throwsA(isA<BankingException>()),
     );
     expect(api.createCalls, 0);
+    expect(pending.value, same(original));
     pending.value = PendingBankAuthorization(
       providerId: 'alternative',
       state: state,

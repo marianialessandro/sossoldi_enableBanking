@@ -27,19 +27,40 @@ enum EbSessionStatus {
 }
 
 class EbSessionAccount {
-  final String uid;
+  final String? uid;
+  final String? iban;
+  final String? name;
+  final String? details;
+  final String? currency;
+  final String? product;
+  final String? cashAccountType;
+  final String? usage;
   final String? identificationHash;
   final List<String> identificationHashes;
 
   const EbSessionAccount({
-    required this.uid,
+    this.uid,
+    this.iban,
+    this.name,
+    this.details,
+    this.currency,
+    this.product,
+    this.cashAccountType,
+    this.usage,
     this.identificationHash,
     this.identificationHashes = const [],
   });
 
   static EbSessionAccount fromJson(Map<String, dynamic> json) =>
       EbSessionAccount(
-        uid: json['uid'] as String,
+        uid: json['uid'] as String?,
+        iban: (json['account_id'] as Map<String, dynamic>?)?['iban'] as String?,
+        name: json['name'] as String?,
+        details: json['details'] as String?,
+        currency: json['currency'] as String?,
+        product: json['product'] as String?,
+        cashAccountType: json['cash_account_type'] as String?,
+        usage: json['usage'] as String?,
         identificationHash: json['identification_hash'] as String?,
         identificationHashes:
             ((json['identification_hashes'] as List?) ?? const [])
@@ -103,8 +124,8 @@ class EbSessionDetails {
         authorized: _optionalDate(json['authorized']),
         closed: _optionalDate(json['closed']),
       );
-    } catch (error) {
-      throw FormatException('Malformed Enable Banking session: $error');
+    } catch (_) {
+      throw const FormatException('Malformed Enable Banking session');
     }
   }
 

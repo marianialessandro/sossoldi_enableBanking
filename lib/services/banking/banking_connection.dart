@@ -18,6 +18,7 @@ class BankingConnection {
   final DateTime validUntil;
   final BankingConnectionStatus status;
   final List<BankingAccountReference> accounts;
+  final List<BankingAccountDescriptor> accountDescriptors;
   final DateTime? createdAt;
   final DateTime? authorizedAt;
   final DateTime? closedAt;
@@ -28,10 +29,17 @@ class BankingConnection {
     required this.validUntil,
     required this.status,
     required List<BankingAccountReference> accounts,
+    List<BankingAccountDescriptor>? accountDescriptors,
     this.createdAt,
     this.authorizedAt,
     this.closedAt,
-  }) : accounts = List.unmodifiable(accounts);
+  }) : accounts = List.unmodifiable(accounts),
+       accountDescriptors = List.unmodifiable(
+         accountDescriptors ??
+             accounts.map(
+               (reference) => BankingAccountDescriptor(reference: reference),
+             ),
+       );
 
   bool isExpiredAt(DateTime now) => !now.isBefore(validUntil);
 }

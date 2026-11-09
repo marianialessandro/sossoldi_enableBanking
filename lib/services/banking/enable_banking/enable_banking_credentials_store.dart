@@ -22,6 +22,8 @@ const _kLegacyConfigJsonKey = 'eb_config_json';
 class _SetupWrites {
   int revision = 0;
   int invalidation = 0;
+  int credentialRevision = 0;
+  int credentialWrites = 0;
   Future<void>? pending;
 
   Future<bool> run(int? expected, Future<void> Function() operation) {
@@ -61,6 +63,28 @@ class EnableBankingCredentialsStore {
   static final _queues = Expando<_SetupWrites>();
   _SetupWrites get _writes => _queues[_storage] ??= _SetupWrites();
 
+  Object get credentialScope => _storage;
+  int get credentialRevision => _writes.credentialRevision;
+  void invalidateCredentialCapabilities() => ++_writes.credentialRevision;
+
+  bool _credentialsCurrent(int revision) =>
+      revision == credentialRevision && _writes.credentialWrites == 0;
+
+  Future<bool> _changeCredentials(
+    int? expected,
+    Future<void> Function() operation,
+  ) async {
+    if (expected != null && expected != setupRevision) return false;
+    ++_writes.credentialRevision;
+    ++_writes.credentialWrites;
+    try {
+      return await _writes.run(expected, operation);
+    } finally {
+      --_writes.credentialWrites;
+      ++_writes.credentialRevision;
+    }
+  }
+
   int beginSetupEditing() => ++_writes.revision;
   int get setupRevision => _writes.revision;
   int get setupInvalidation => _writes.invalidation;
@@ -75,7 +99,7 @@ class EnableBankingCredentialsStore {
   }
 
   Future<void> clearCredentialsIfCurrent(int revision) async {
-    await _writes.run(revision, () async {
+    await _changeCredentials(revision, () async {
       await _storage.delete(key: _kCredentialSetKey);
       await _clearLegacyKeys();
     });
@@ -114,7 +138,7 @@ class EnableBankingCredentialsStore {
       'config': config.toJson(),
       'private_key_pem': privateKeyPem,
     });
-    final saved = await _writes.run(expectedSetupRevision, () async {
+    final saved = await _changeCredentials(expectedSetupRevision, () async {
       await _storage.write(key: _kCredentialSetKey, value: encoded);
       await _clearLegacyKeys();
     });
@@ -126,8 +150,16 @@ class EnableBankingCredentialsStore {
   }
 
   Future<EnableBankingCredentials?> readCredentials() async {
+    // A writer may be replacing the complete bundle; readers can retry once it is committed.
+    if (_writes.credentialWrites != 0) return null;
+    final revision = credentialRevision;
     final encoded = await _storage.read(key: _kCredentialSetKey);
-    if (encoded == null) return _readLegacyCredentials();
+    if (!_credentialsCurrent(revision)) return null;
+    if (encoded == null) {
+      final credentials = await _readLegacyCredentials();
+      if (!_credentialsCurrent(revision)) return null;
+      return credentials;
+    }
 
     try {
       final json = jsonDecode(encoded) as Map<String, dynamic>;
@@ -215,7 +247,7 @@ class EnableBankingCredentialsStore {
   Future<void> clear() async {
     ++_writes.revision;
     ++_writes.invalidation;
-    await _writes.run(null, () async {
+    await _changeCredentials(null, () async {
       await _deleteDraft();
       await _storage.delete(key: _kCredentialSetKey);
       await _clearLegacyKeys();

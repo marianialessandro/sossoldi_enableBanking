@@ -16,6 +16,61 @@ Map<String, dynamic> _loadJson(String name) =>
         as Map<String, dynamic>;
 
 void main() {
+  test('POST and GET preserve account metadata without an UID', () {
+    for (final includeNull in [false, true]) {
+      final metadata = <String, dynamic>{
+        if (includeNull) 'uid': null,
+        'name': 'Unavailable savings',
+        'currency': 'EUR',
+        'product': 'Savings',
+        'account_id': {'iban': 'IT00SYNTHETIC'},
+        'identification_hash': 'synthetic-hash',
+      };
+      final post = _loadJson('eb_session.json');
+      post['accounts'] = [
+        metadata,
+        {'uid': 'good'},
+      ];
+      final created = EbSession.fromJson(post);
+      expect(created.accounts.first.uid, isNull);
+      expect(created.accounts.first.name, 'Unavailable savings');
+      expect(created.accounts.last.uid, 'good');
+      final get = _loadJson('eb_get_session.json');
+      get['accounts_data'] = [metadata];
+      final resumed = EbSessionDetails.fromJson(get);
+      expect(resumed.accountsData.first.uid, isNull);
+      expect(resumed.accountsData.first.name, 'Unavailable savings');
+    }
+  });
+  test('missing UID never permits malformed account metadata', () {
+    for (final invalid in [12, true, [], {}]) {
+      expect(() => EbAccount.fromJson({'uid': invalid}), throwsA(anything));
+      expect(
+        () => EbSessionAccount.fromJson({'uid': invalid}),
+        throwsA(anything),
+      );
+      expect(() => EbAccount.fromJson({'name': invalid}), throwsA(anything));
+      expect(
+        () => EbSessionAccount.fromJson({'name': invalid}),
+        throwsA(anything),
+      );
+      for (final malformed in <Map<String, dynamic>>[
+        {'identification_hash': invalid},
+        {
+          'identification_hashes': [invalid],
+        },
+        {'currency': invalid},
+        {
+          'account_id': {'iban': invalid},
+        },
+      ]) {
+        expect(() => EbAccount.fromJson(malformed), throwsA(anything));
+        final get = _loadJson('eb_get_session.json');
+        get['accounts_data'] = [malformed];
+        expect(() => EbSessionDetails.fromJson(get), throwsFormatException);
+      }
+    }
+  });
   group('EbApplication.fromJson', () {
     test('parses server-derived environment and available countries', () {
       final application = EbApplication.fromJson(

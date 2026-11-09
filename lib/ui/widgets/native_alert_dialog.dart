@@ -1,7 +1,6 @@
-import 'dart:io';
-
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 /// An alert dialog with the native look and feel.
 ///
@@ -20,13 +19,25 @@ class AdaptiveDialog extends StatelessWidget {
 
   /// The content of the dialog.
   final Widget? content;
+  final bool scrollable;
 
-  const AdaptiveDialog({super.key, this.actions, this.title, this.content});
+  const AdaptiveDialog({
+    super.key,
+    this.actions,
+    this.title,
+    this.content,
+    this.scrollable = false,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return Platform.isAndroid
-        ? _AndroidDialog(actions: actions, title: title, content: content)
+    return Theme.of(context).platform == TargetPlatform.android
+        ? _AndroidDialog(
+            actions: actions,
+            title: title,
+            content: content,
+            scrollable: scrollable,
+          )
         : _CupertinoDialog(actions: actions, title: title, content: content);
   }
 }
@@ -46,12 +57,16 @@ class AdaptiveDialogAction {
 
   /// Only used on iOS. When `true` the action [Text] will be bold.
   final bool isDefaultAction;
+  final FocusNode? focusNode;
+  final bool autofocus;
 
   AdaptiveDialogAction({
     required this.child,
     this.onPressed,
     this.isDestructiveAction = false,
     this.isDefaultAction = false,
+    this.focusNode,
+    this.autofocus = false,
   });
 }
 
@@ -59,24 +74,41 @@ class _AndroidDialog extends StatelessWidget {
   final List<AdaptiveDialogAction>? actions;
   final Widget? title;
   final Widget? content;
+  final bool scrollable;
 
-  const _AndroidDialog({this.actions, this.title, this.content});
+  const _AndroidDialog({
+    this.actions,
+    this.title,
+    this.content,
+    this.scrollable = false,
+  });
 
   @override
   Widget build(BuildContext context) {
+    final buttons =
+        actions
+            ?.map(
+              (action) => TextButton(
+                onPressed: action.onPressed,
+                focusNode: action.focusNode,
+                autofocus: action.autofocus,
+                style: TextButton.styleFrom(minimumSize: const Size(48, 48)),
+                child: action.child,
+              ),
+            )
+            .toList() ??
+        <Widget>[];
     return AlertDialog(
+      scrollable: scrollable,
       title: title,
-      content: content,
-      actions: actions != null
-          ? actions!
-                .map(
-                  (action) => TextButton(
-                    onPressed: action.onPressed,
-                    child: action.child,
-                  ),
-                )
-                .toList()
-          : [],
+      content: scrollable
+          ? Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [?content, ...buttons],
+            )
+          : content,
+      actions: scrollable ? null : buttons,
     );
   }
 }
@@ -95,16 +127,59 @@ class _CupertinoDialog extends StatelessWidget {
       content: content,
       actions: actions != null
           ? actions!
-                .map(
-                  (action) => CupertinoDialogAction(
-                    isDestructiveAction: action.isDestructiveAction,
-                    isDefaultAction: action.isDefaultAction,
-                    onPressed: action.onPressed,
-                    child: action.child,
-                  ),
-                )
+                .map((action) => _FocusableCupertinoAction(action: action))
                 .toList()
           : [],
     );
   }
+}
+
+class _FocusableCupertinoAction extends StatefulWidget {
+  final AdaptiveDialogAction action;
+  const _FocusableCupertinoAction({required this.action});
+  @override
+  State<_FocusableCupertinoAction> createState() =>
+      _FocusableCupertinoActionState();
+}
+
+class _FocusableCupertinoActionState extends State<_FocusableCupertinoAction> {
+  bool _focused = false;
+  @override
+  Widget build(BuildContext context) => FocusableActionDetector(
+    focusNode: widget.action.focusNode,
+    autofocus: widget.action.autofocus,
+    enabled: widget.action.onPressed != null,
+    onShowFocusHighlight: (value) => setState(() => _focused = value),
+    shortcuts: const {
+      SingleActivator(LogicalKeyboardKey.enter): ActivateIntent(),
+      SingleActivator(LogicalKeyboardKey.space): ActivateIntent(),
+    },
+    actions: {
+      ActivateIntent: CallbackAction<ActivateIntent>(
+        onInvoke: (_) {
+          widget.action.onPressed?.call();
+          return null;
+        },
+      ),
+    },
+    child: DecoratedBox(
+      decoration: BoxDecoration(
+        border: Border.all(
+          color: _focused
+              ? Theme.of(context).colorScheme.primary
+              : Colors.transparent,
+          width: 2,
+        ),
+      ),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+        child: CupertinoDialogAction(
+          isDestructiveAction: widget.action.isDestructiveAction,
+          isDefaultAction: widget.action.isDefaultAction,
+          onPressed: widget.action.onPressed,
+          child: widget.action.child,
+        ),
+      ),
+    ),
+  );
 }

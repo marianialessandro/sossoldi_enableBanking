@@ -126,7 +126,18 @@ class BankConnectionRepository {
     required DateTime validUntil,
     required String psuType,
     int? reconnectConnectionId,
+    bool Function()? isAuthorizationCurrent,
   }) async {
+    void check() {
+      if (isAuthorizationCurrent != null && !isAuthorizationCurrent()) {
+        throw const BankReconciliationException(
+          BankReconciliationFailure.invalidConnectionState,
+          'Authorization was invalidated',
+        );
+      }
+    }
+
+    check();
     if (psuType != 'personal') {
       throw const BankReconciliationException(
         BankReconciliationFailure.invalidConnectionState,
@@ -135,6 +146,7 @@ class BankConnectionRepository {
     }
     final db = await _database;
     return db.transaction((txn) async {
+      check();
       final duplicate = await txn.query(
         bankConnectionTable,
         columns: BankConnectionFields.allFields,
@@ -143,6 +155,7 @@ class BankConnectionRepository {
         whereArgs: [authorizationId, providerId],
         limit: 1,
       );
+      check();
       if (duplicate.isNotEmpty) {
         return BankConnection.fromJson(duplicate.single);
       }
@@ -163,6 +176,7 @@ class BankConnectionRepository {
         final values = connection.toJson(clock: now)
           ..remove(BankConnectionFields.id);
         final id = await txn.insert(bankConnectionTable, values);
+        check();
         return connection.copy(id: id, createdAt: now, updatedAt: now);
       }
 
@@ -173,6 +187,7 @@ class BankConnectionRepository {
         whereArgs: [reconnectConnectionId],
         limit: 1,
       );
+      check();
       if (rows.isEmpty) {
         throw const BankReconciliationException(
           BankReconciliationFailure.invalidConnectionState,
@@ -206,14 +221,18 @@ class BankConnectionRepository {
         where: '${BankConnectionFields.id} = ?',
         whereArgs: [existing.id],
       );
+      check();
       return staged.copy(updatedAt: now);
     });
   }
 
   Future<BankConnection> activateStagedConnection(
     int connectionId,
-    List<BankAccountLink> links,
-  ) async {
+    List<BankAccountLink> links, {
+    BankConnection? expectedStaging,
+    DateTime Function()? clock,
+    bool Function()? isAuthorizationCurrent,
+  }) async {
     final db = await _database;
     return db.transaction((txn) async {
       final connectionRows = await txn.query(
@@ -230,8 +249,32 @@ class BankConnectionRepository {
         );
       }
       final connection = BankConnection.fromJson(connectionRows.single);
-      if (connection.pendingRemoteConnectionId == null ||
-          connection.pendingValidUntil == null) {
+      final now = (clock ?? DateTime.now)().toUtc();
+      void check() {
+        if (isAuthorizationCurrent != null && !isAuthorizationCurrent()) {
+          throw const BankReconciliationException(
+            BankReconciliationFailure.invalidConnectionState,
+            'Authorization was invalidated',
+          );
+        }
+      }
+
+      check();
+      if (expectedStaging == null ||
+          expectedStaging.id != connectionId ||
+          !connection.sameLifecycle(expectedStaging) ||
+          !{
+            BankConnectionStatus.awaitingImport,
+            BankConnectionStatus.active,
+            BankConnectionStatus.expired,
+            BankConnectionStatus.reauthRequired,
+          }.contains(connection.status) ||
+          connection.pendingRemoteConnectionId == null ||
+          connection.pendingRemoteConnectionId!.trim().isEmpty ||
+          connection.pendingAuthorizationId == null ||
+          connection.pendingAuthorizationId!.trim().isEmpty ||
+          connection.pendingValidUntil == null ||
+          !connection.pendingValidUntil!.isAfter(now)) {
         throw const BankReconciliationException(
           BankReconciliationFailure.invalidConnectionState,
           'Connection has no staged remote connection',
@@ -366,9 +409,7 @@ class BankConnectionRepository {
             if (link.currency != null)
               BankAccountFields.currencyCode: link.currency,
             BankAccountFields.active: 1,
-            BankAccountFields.updatedAt: DateTime.now()
-                .toUtc()
-                .toIso8601String(),
+            BankAccountFields.updatedAt: now.toIso8601String(),
           },
           where: '${BankAccountFields.id} = ?',
           whereArgs: [accountId],
@@ -417,13 +458,132 @@ class BankConnectionRepository {
       );
       await txn.update(
         bankConnectionTable,
-        activated.toJson(update: true),
+        activated.toJson(update: true, clock: now),
         where: '${BankConnectionFields.id} = ?',
         whereArgs: [connectionId],
       );
-      return activated;
+      check();
+      return activated.copy(updatedAt: now);
     });
   }
+
+  Future<BankConnection?> _mutateIfCurrent(
+    BankConnection expected,
+    BankConnection Function(BankConnection) change, {
+    bool unlink = false,
+    DateTime Function()? clock,
+  }) async {
+    final db = await _database;
+    return db.transaction((txn) async {
+      final rows = await txn.query(
+        bankConnectionTable,
+        where: '${BankConnectionFields.id} = ?',
+        whereArgs: [expected.id],
+      );
+      if (rows.isEmpty) return null;
+      final current = BankConnection.fromJson(rows.single);
+      if (!current.sameLifecycle(expected)) return null;
+      final now = (clock ?? DateTime.now)().toUtc();
+      if (unlink) {
+        final accounts = await txn.query(
+          bankAccountTable,
+          columns: [BankAccountFields.id],
+          where: '${BankAccountFields.ebConnectionId} = ?',
+          whereArgs: [expected.id],
+        );
+        for (final row in accounts) {
+          await _unlinkAccount(
+            txn,
+            expected.id!,
+            row[BankAccountFields.id] as int,
+          );
+        }
+      }
+      final updated = change(current).copy(updatedAt: now);
+      await txn.update(
+        bankConnectionTable,
+        updated.toJson(update: true, clock: now),
+        where: '${BankConnectionFields.id} = ?',
+        whereArgs: [expected.id],
+      );
+      return updated;
+    });
+  }
+
+  Future<BankConnection?> markStatusIfCurrent(
+    BankConnection expected,
+    BankConnectionStatus status, {
+    DateTime Function()? clock,
+  }) => _mutateIfCurrent(
+    expected,
+    (current) => current.copy(status: status),
+    clock: clock,
+  );
+
+  Future<BankConnection?> discardStagedConnectionIfCurrent(
+    BankConnection expected, {
+    DateTime Function()? clock,
+    BankConnectionStatus? restoreStatus,
+  }) => _mutateIfCurrent(
+    expected,
+    (current) => current.copy(
+      status: restoreStatus,
+      pendingRemoteConnectionId: null,
+      pendingAuthorizationId: null,
+      pendingValidUntil: null,
+    ),
+    clock: clock,
+  );
+
+  Future<BankConnection?> failStagedConnectionIfCurrent(
+    BankConnection expected,
+    BankConnectionStatus status, {
+    DateTime Function()? clock,
+  }) => _mutateIfCurrent(
+    expected,
+    (current) => current.copy(
+      pendingRemoteConnectionId: null,
+      pendingAuthorizationId: null,
+      pendingValidUntil: null,
+      status: status,
+    ),
+    clock: clock,
+  );
+
+  Future<BankConnection?> finalizeRemoteRevocationIfCurrent(
+    BankConnection expected, {
+    DateTime Function()? clock,
+  }) => _disconnectIfCurrent(
+    expected,
+    BankConnectionStatus.revoked,
+    clock: clock,
+  );
+
+  Future<BankConnection?> disconnectLocallyIfCurrent(
+    BankConnection expected, {
+    DateTime Function()? clock,
+  }) => _disconnectIfCurrent(
+    expected,
+    BankConnectionStatus.disconnected,
+    clock: clock,
+  );
+
+  Future<BankConnection?> _disconnectIfCurrent(
+    BankConnection expected,
+    BankConnectionStatus status, {
+    DateTime Function()? clock,
+  }) => _mutateIfCurrent(
+    expected,
+    (current) => current.copy(
+      status: status,
+      remoteConnectionId: null,
+      pendingRemoteConnectionId: null,
+      pendingAuthorizationId: null,
+      pendingValidUntil: null,
+    ),
+    unlink: true,
+    clock: clock,
+  );
 
   Future<void> markStatus(int id, BankConnectionStatus status) async {
     final db = await _database;
@@ -439,6 +599,48 @@ class BankConnectionRepository {
       whereArgs: [id],
     );
     if (changed != 1) throw StateError('Bank connection $id not found');
+  }
+
+  /// Removes only the staging owned by this attempt; previous active data survives.
+  Future<void> discardAuthorizationStaging(
+    int id,
+    String authorizationId,
+    String remoteId, {
+    BankConnection? expectedStaging,
+  }) async {
+    final db = await _database;
+    await db.transaction((txn) async {
+      final rows = await txn.query(
+        bankConnectionTable,
+        where:
+            '${BankConnectionFields.id} = ? AND ${BankConnectionFields.pendingAuthorizationId} = ? AND ${BankConnectionFields.pendingRemoteConnectionId} = ?',
+        whereArgs: [id, authorizationId, remoteId],
+      );
+      if (rows.isEmpty) return;
+      final connection = BankConnection.fromJson(rows.single);
+      if (expectedStaging != null &&
+          !connection.sameLifecycle(expectedStaging)) {
+        return;
+      }
+      if (connection.remoteConnectionId == null) {
+        await txn.delete(
+          bankConnectionTable,
+          where: '${BankConnectionFields.id} = ?',
+          whereArgs: [id],
+        );
+      } else {
+        await txn.update(
+          bankConnectionTable,
+          {
+            BankConnectionFields.pendingRemoteConnectionId: null,
+            BankConnectionFields.pendingAuthorizationId: null,
+            BankConnectionFields.pendingValidUntil: null,
+          },
+          where: '${BankConnectionFields.id} = ?',
+          whereArgs: [id],
+        );
+      }
+    });
   }
 
   Future<void> discardStagedConnection(int id) async {

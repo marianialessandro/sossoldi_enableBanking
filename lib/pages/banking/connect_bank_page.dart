@@ -7,7 +7,9 @@ import '../../ui/widgets/default_container.dart';
 import '../../ui/widgets/rounded_icon.dart';
 import 'widgets/aspsp_selector.dart';
 import 'widgets/connection_card.dart';
+import 'widgets/confirm_disconnect_dialog.dart';
 import 'widgets/country_selector.dart';
+import 'banking_import_context.dart';
 
 /// Banking hub: the banks already linked, plus the entry point of the country → bank → consent flow.
 class ConnectBankPage extends ConsumerStatefulWidget {
@@ -18,6 +20,27 @@ class ConnectBankPage extends ConsumerStatefulWidget {
 }
 
 class _ConnectBankPageState extends ConsumerState<ConnectBankPage> {
+  final _noticeFocus = FocusNode(debugLabel: 'Bank recovery result');
+  BankRecoveryActionResult? _focusedNotice;
+  ConnectBankFlow? _flow;
+  @override
+  void initState() {
+    super.initState();
+    _flow = ref.read(connectBankFlowProvider.notifier);
+    Future<void>.microtask(() async {
+      if (mounted) {
+        _flow!.dismissRecoveryNotice();
+        await _flow!.refreshAuthorization();
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _noticeFocus.dispose();
+    super.dispose();
+  }
+
   void _openSheet(Widget Function(ScrollController) builder) {
     showModalBottomSheet(
       context: context,
@@ -59,6 +82,18 @@ class _ConnectBankPageState extends ConsumerState<ConnectBankPage> {
   Widget build(BuildContext context) {
     final hasCredentials =
         ref.watch(enableBankingSettingsProvider).value != null;
+    final flowState = ref.watch(connectBankFlowProvider);
+    final notice = flowState.recoveryNotice;
+    if (!identical(notice, _focusedNotice)) {
+      _focusedNotice = notice;
+      if (notice != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && identical(_focusedNotice, notice)) {
+            _noticeFocus.requestFocus();
+          }
+        });
+      }
+    }
     final connections = ref.watch(bankConnectionsProvider);
     final recoveryIssue = ref.watch(bankRecoveryIssueProvider);
 
@@ -72,7 +107,9 @@ class _ConnectBankPageState extends ConsumerState<ConnectBankPage> {
         title: const Text('Connect bank'),
         actions: [
           IconButton(
-            onPressed: hasCredentials ? _selectCountry : null,
+            onPressed: hasCredentials && flowState.authorizationOwner == null
+                ? _selectCountry
+                : null,
             tooltip: 'Link a bank',
             icon: const Icon(Icons.add_circle),
             splashRadius: 28,
@@ -84,6 +121,55 @@ class _ConnectBankPageState extends ConsumerState<ConnectBankPage> {
         physics: const BouncingScrollPhysics(),
         child: Column(
           children: [
+            if (flowState.authorizationOwner != null)
+              const DefaultContainer(child: AuthorizationRecoveryControls()),
+            for (final notice in flowState.visibleRecoveryNotices)
+              DefaultContainer(
+                child: Focus(
+                  focusNode: identical(notice, flowState.recoveryNotice)
+                      ? _noticeFocus
+                      : null,
+                  child: Semantics(
+                    liveRegion: true,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        if (notice.connection != null)
+                          Text(notice.connection!.institutionName),
+                        Text(
+                          notice.message,
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(
+                                color: Theme.of(context).colorScheme.onSurface,
+                              ),
+                        ),
+                        const SizedBox(height: Sizes.lg),
+                        if (notice.status == BankRecoveryActionStatus.failed &&
+                            notice.kind == BankRecoveryActionKind.cancel)
+                          const AuthorizationRecoveryControls(),
+                        TextButton(
+                          onPressed: () => ref
+                              .read(connectBankFlowProvider.notifier)
+                              .dismissRecoveryNotice(notice),
+                          style: TextButton.styleFrom(
+                            minimumSize: const Size(48, 48),
+                          ),
+                          child: const Text('Dismiss'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            if (flowState.pendingCleanup != null)
+              DefaultContainer(
+                child: TextButton(
+                  onPressed: () => ref
+                      .read(connectBankFlowProvider.notifier)
+                      .retryPendingCleanup(flowState.pendingCleanup),
+                  child: const Text('Retry cleanup'),
+                ),
+              ),
             if (recoveryIssue != null)
               DefaultContainer(
                 child: Semantics(
@@ -92,8 +178,12 @@ class _ConnectBankPageState extends ConsumerState<ConnectBankPage> {
                     children: [
                       Text(recoveryIssue),
                       TextButton(
-                        onPressed: () =>
-                            ref.invalidate(bankingUiBootstrapProvider),
+                        onPressed: () async {
+                          await resumeBankImport(context, ref);
+                          if (mounted) {
+                            ref.invalidate(bankingUiBootstrapProvider);
+                          }
+                        },
                         child: const Text('Try again'),
                       ),
                     ],
@@ -132,31 +222,35 @@ class _ConnectBankPageState extends ConsumerState<ConnectBankPage> {
                     ),
                   ],
                 ),
-              )
-            else
-              connections.when(
-                data: (items) => items.isEmpty
-                    ? const _NoBankLinked()
-                    : ListView.builder(
-                        shrinkWrap: true,
-                        physics: const NeverScrollableScrollPhysics(),
-                        itemCount: items.length,
-                        itemBuilder: (context, i) => Container(
-                          margin: const EdgeInsets.only(bottom: Sizes.lg),
-                          child: ConnectionCard(connection: items[i]),
+              ),
+            connections.when(
+              data: (items) => items.isEmpty
+                  ? flowState.authorizationOwner != null || notice != null
+                        ? const SizedBox.shrink()
+                        : const _NoBankLinked()
+                  : ListView.builder(
+                      shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      itemCount: items.length,
+                      itemBuilder: (context, i) => Container(
+                        margin: const EdgeInsets.only(bottom: Sizes.lg),
+                        child: ConnectionCard(
+                          key: ValueKey(items[i].id),
+                          connection: items[i],
                         ),
                       ),
-                loading: () => const Center(child: CircularProgressIndicator()),
-                error: (err, stack) => Column(
-                  children: [
-                    const Text('Could not load linked banks.'),
-                    TextButton(
-                      onPressed: () => ref.invalidate(bankConnectionsProvider),
-                      child: const Text('Try again'),
                     ),
-                  ],
-                ),
+              loading: () => const Center(child: CircularProgressIndicator()),
+              error: (err, stack) => Column(
+                children: [
+                  const Text('Could not load linked banks. Try again.'),
+                  TextButton(
+                    onPressed: () => ref.invalidate(bankConnectionsProvider),
+                    child: const Text('Try again'),
+                  ),
+                ],
               ),
+            ),
           ],
         ),
       ),

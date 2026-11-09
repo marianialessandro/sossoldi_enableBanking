@@ -19,7 +19,9 @@ import '../banking_exception.dart';
 import '../banking_reference.dart';
 import '../sync/bank_money.dart';
 import 'bank_authorization_callback.dart';
+import 'bank_authorization_coordinator.dart';
 import 'bank_authorization_result.dart';
+import 'bank_session_recovery_store.dart';
 import 'banking_platform_support.dart';
 import 'pending_bank_authorization.dart';
 import 'pending_bank_authorization_store.dart';
@@ -36,8 +38,12 @@ class BankConsentLifecycleService {
   final DateTime Function() _clock;
   final bool Function() _callbackSupported;
   final Random _random;
+  final BankSessionRecoveryStore? _recoveryStore;
+  Future<BankSessionRecoveryReport>? _recovery;
 
-  Future<void> _callbackQueue = Future.value();
+  final int Function()? _credentialRevision;
+  final ObsoleteBankConnectionHandler? _cleanupObsoleteConnection;
+  BankAuthorizationCoordinator get _coordinator => _pendingStore.coordinator;
 
   BankConsentLifecycleService({
     required BankConsentService consent,
@@ -48,7 +54,11 @@ class BankConsentLifecycleService {
     DateTime Function()? clock,
     bool Function()? callbackSupported,
     Random? random,
-  }) : _consent = consent,
+    int Function()? credentialRevision,
+    ObsoleteBankConnectionHandler? cleanupObsoleteConnection,
+    BankSessionRecoveryStore? recoveryStore,
+  }) : _recoveryStore = recoveryStore,
+       _consent = consent,
        _institutions = institutions,
        _readContext = readContext,
        _pendingStore = pendingStore,
@@ -56,12 +66,197 @@ class BankConsentLifecycleService {
        _clock = clock ?? DateTime.now,
        _callbackSupported =
            callbackSupported ?? BankingPlatformSupport.supportsCallback,
-       _random = random ?? Random.secure();
+       _random = random ?? Random.secure(),
+       _credentialRevision = credentialRevision,
+       _cleanupObsoleteConnection = cleanupObsoleteConnection;
 
   Future<AuthorizationAttempt> startAuthorization(
     BankInstitution selectedBankInstitution, {
     int? reconnectConnectionId,
-  }) async {
+    void Function(BankAuthorizationOwner owner)? onOwner,
+  }) {
+    final revision = _coordinator.revision;
+    final credentials = _credentialRevision?.call();
+    final key = (
+      selectedBankInstitution.providerId,
+      selectedBankInstitution.id,
+      selectedBankInstitution.name,
+      selectedBankInstitution.country,
+      reconnectConnectionId,
+      credentials,
+      revision,
+    );
+    final current = _coordinator.authorizationOwner;
+    final owner =
+        current != null &&
+            current.revision == revision &&
+            current.credentialRevision == credentials &&
+            (current.pending == null ||
+                current.pending!.expiresAt.isAfter(_clock().toUtc())) &&
+            (_coordinator.authorizationKey == key ||
+                (current.pending?.institutionName ==
+                        selectedBankInstitution.name &&
+                    current.pending?.institutionCountry ==
+                        selectedBankInstitution.country &&
+                    current.pending?.providerId ==
+                        selectedBankInstitution.providerId &&
+                    current.pending?.reconnectConnectionId ==
+                        reconnectConnectionId))
+        ? current
+        : BankAuthorizationOwner(
+            scope: _coordinator,
+            generation: Object(),
+            revision: revision,
+            credentialRevision: credentials,
+            bankName: selectedBankInstitution.name,
+          );
+    // Publish before the first asynchronous boundary, including context reads.
+    if (current == null ||
+        current.credentialRevision != credentials ||
+        current.revision != revision ||
+        (current.pending != null &&
+            !current.pending!.expiresAt.isAfter(_clock().toUtc()))) {
+      _coordinator.authorizationOwner = owner;
+      _coordinator.authorizationKey = key;
+    }
+    onOwner?.call(owner);
+    return _coordinator.start(
+      key,
+      () => _startAuthorization(
+        selectedBankInstitution,
+        reconnectConnectionId,
+        revision,
+        credentials,
+        owner,
+      ),
+      readContextKey: () async {
+        final context = await _readContext();
+        await _checkCurrent(revision, credentials, context);
+        _assertCurrent(revision, credentials);
+        return (context.providerId, context.applicationId, context.redirectUri);
+      },
+    );
+  }
+
+  bool _isCurrent(int revision, int? credentials) =>
+      revision == _coordinator.revision &&
+      credentials == _credentialRevision?.call();
+
+  void _assertCurrent(int revision, int? credentials) {
+    if (!_isCurrent(revision, credentials)) {
+      throw const BankingException(
+        providerId: 'application',
+        failure: BankingFailure.rejected,
+      );
+    }
+  }
+
+  Future<void> _checkCurrent(
+    int revision,
+    int? credentials, [
+    BankAuthorizationContext? context,
+    PendingBankAuthorization? pending,
+  ]) async {
+    void check() {
+      if (!_isCurrent(revision, credentials)) {
+        throw const BankingException(
+          providerId: 'application',
+          failure: BankingFailure.rejected,
+        );
+      }
+    }
+
+    check();
+    if (context != null) {
+      final current = await _readContext();
+      check();
+      if (current.providerId != context.providerId ||
+          current.applicationId != context.applicationId ||
+          current.redirectUri != context.redirectUri) {
+        throw const BankingException(
+          providerId: 'application',
+          failure: BankingFailure.authentication,
+        );
+      }
+    }
+    if (pending != null) {
+      final current = await _pendingStore.read();
+      check();
+      if (current?.state != pending.state ||
+          current?.authorizationId != pending.authorizationId ||
+          current?.applicationId != pending.applicationId ||
+          current?.providerId != pending.providerId) {
+        throw const BankingException(
+          providerId: 'application',
+          failure: BankingFailure.rejected,
+        );
+      }
+      if (_credentialRevision == null && context != null) {
+        final latest = await _readContext();
+        check();
+        if (latest.providerId != context.providerId ||
+            latest.applicationId != context.applicationId ||
+            latest.redirectUri != context.redirectUri) {
+          throw const BankingException(
+            providerId: 'application',
+            failure: BankingFailure.authentication,
+          );
+        }
+      }
+    }
+  }
+
+  Future<void> _clearOwnedPending(
+    PendingBankAuthorization pending, {
+    int? allowedStagedConnectionId,
+  }) => _coordinator.commit(() async {
+    final current = await _pendingStore.read();
+    if (current?.state == pending.state &&
+        current?.authorizationId == pending.authorizationId &&
+        current?.providerId == pending.providerId &&
+        current?.applicationId == pending.applicationId &&
+        (current?.stagedConnectionId == pending.stagedConnectionId ||
+            (allowedStagedConnectionId != null &&
+                current?.stagedConnectionId == allowedStagedConnectionId))) {
+      await _pendingStore.clear();
+    }
+  });
+
+  Future<void> _savePending(
+    PendingBankAuthorization pending,
+    int revision,
+    int? credentials,
+    BankAuthorizationContext context,
+  ) => _coordinator.commit(() async {
+    await _checkCurrent(revision, credentials, context);
+    _assertCurrent(revision, credentials);
+    _adoptPendingOwner(pending);
+    _coordinator.authorizationSaving = true;
+    try {
+      await _pendingStore.save(pending);
+      await _checkCurrent(revision, credentials, context, pending);
+      _assertCurrent(revision, credentials);
+    } catch (_) {
+      final current = await _pendingStore.read();
+      if (current?.state == pending.state &&
+          current?.providerId == pending.providerId &&
+          current?.applicationId == pending.applicationId &&
+          current?.authorizationId == pending.authorizationId) {
+        await _pendingStore.clear();
+      }
+      rethrow;
+    } finally {
+      _coordinator.authorizationSaving = false;
+    }
+  });
+
+  Future<AuthorizationAttempt> _startAuthorization(
+    BankInstitution selectedBankInstitution,
+    int? reconnectConnectionId,
+    int revision,
+    int? credentials,
+    BankAuthorizationOwner owner,
+  ) async {
     if (!_callbackSupported()) {
       throw const BankingException(
         providerId: 'application',
@@ -69,16 +264,24 @@ class BankConsentLifecycleService {
       );
     }
     final config = await _readContext();
+    await _checkCurrent(revision, credentials, config);
+    _assertCurrent(revision, credentials);
     if (selectedBankInstitution.providerId != config.providerId) {
       throw BankingException(
         providerId: config.providerId,
         failure: BankingFailure.rejected,
       );
     }
-    final existingPending = await _pendingStore.read();
+    final existingPending = await _coordinator.commit(
+      () => _pendingStore.read(),
+    );
+    await _checkCurrent(revision, credentials, config);
+    _assertCurrent(revision, credentials);
     if (existingPending != null) {
       if (!existingPending.expiresAt.isAfter(_clock().toUtc())) {
-        await _pendingStore.clear();
+        await _clearOwnedPending(existingPending);
+        await _checkCurrent(revision, credentials, config);
+        _assertCurrent(revision, credentials);
       } else if (existingPending.providerId == config.providerId &&
           existingPending.applicationId == config.applicationId &&
           existingPending.redirectUri == config.redirectUri &&
@@ -89,6 +292,7 @@ class BankConsentLifecycleService {
         return AuthorizationAttempt(
           url: Uri.parse(existingPending.authorizationUrl),
           consentValidUntil: existingPending.consentValidUntil,
+          owner: _adoptPendingOwner(existingPending, owner),
         );
       } else {
         throw const BankingException(
@@ -105,6 +309,8 @@ class BankConsentLifecycleService {
             reconnectConnectionId,
             config.applicationId,
           );
+    await _checkCurrent(revision, credentials, config);
+    _assertCurrent(revision, credentials);
     if (!institution.customerTypes.contains(BankingCustomerType.personal)) {
       throw const BankingException(
         providerId: 'application',
@@ -138,6 +344,8 @@ class BankConsentLifecycleService {
         redirectUri: Uri.parse(config.redirectUri),
       ),
     );
+    await _checkCurrent(revision, credentials, config);
+    _assertCurrent(revision, credentials);
     final authorizationUri = authorization.uri;
     if (authorization.providerId != config.providerId ||
         authorization.authorizationId.trim().isEmpty ||
@@ -150,7 +358,7 @@ class BankConsentLifecycleService {
         failure: BankingFailure.invalidResponse,
       );
     }
-    await _pendingStore.save(
+    await _savePending(
       PendingBankAuthorization(
         providerId: config.providerId,
         state: state,
@@ -164,10 +372,16 @@ class BankConsentLifecycleService {
         consentValidUntil: consentValidUntil,
         reconnectConnectionId: reconnectConnectionId,
       ),
+      revision,
+      credentials,
+      config,
     );
+    await _checkCurrent(revision, credentials, config);
+    _assertCurrent(revision, credentials);
     return AuthorizationAttempt(
       url: authorizationUri,
       consentValidUntil: consentValidUntil,
+      owner: await captureAuthorizationOwner(),
     );
   }
 
@@ -179,30 +393,260 @@ class BankConsentLifecycleService {
     return AuthorizationLaunchResult(url: url, opened: opened);
   }
 
-  Future<void> cancelAuthorization() => _pendingStore.clear();
+  bool _samePending(PendingBankAuthorization a, PendingBankAuthorization b) =>
+      jsonEncode(a.toJson()) == jsonEncode(b.toJson());
 
-  Future<bool> clearExpiredAuthorization() async {
+  BankAuthorizationOwner _adoptPendingOwner(
+    PendingBankAuthorization pending, [
+    BankAuthorizationOwner? previous,
+    bool fresh = false,
+  ]) {
+    final current = fresh ? null : previous ?? _coordinator.authorizationOwner;
+    final owner = BankAuthorizationOwner(
+      scope: _coordinator,
+      generation: current?.generation ?? Object(),
+      revision: _coordinator.revision,
+      credentialRevision: _credentialRevision?.call(),
+      bankName: pending.institutionName,
+      pending: pending,
+    );
+    _coordinator.authorizationOwner = owner;
+    return owner;
+  }
+
+  bool isAuthorizationOwnerCurrent(BankAuthorizationOwner expected) {
+    final current = _coordinator.authorizationOwner;
+    return current != null &&
+        current.sameGeneration(expected) &&
+        (expected.pending == null ||
+            (current.pending != null &&
+                _samePending(current.pending!, expected.pending!))) &&
+        _isCurrent(expected.revision, expected.credentialRevision);
+  }
+
+  Future<BankAuthorizationOwner?> captureAuthorizationOwner() async {
+    final revision = _coordinator.revision;
+    final credentials = _credentialRevision?.call();
+    final before = _coordinator.authorizationOwner;
+    final pending = await _pendingStore.read();
+    if (!_isCurrent(revision, credentials) ||
+        !identical(before, _coordinator.authorizationOwner)) {
+      return _coordinator.authorizationOwner;
+    }
+    // A phase published before storage completes must not be replaced by an older storage snapshot.
+    if (_coordinator.authorizationSaving) {
+      return before;
+    }
+    if (pending == null) {
+      if (before?.pending == null || _coordinator.authorizationSaving) {
+        return before;
+      }
+      _coordinator.authorizationOwner = null;
+      _coordinator.authorizationKey = null;
+      return null;
+    }
+    if (before?.pending != null &&
+        before!.credentialRevision == credentials &&
+        _samePending(before.pending!, pending)) {
+      return before;
+    }
+    // A replaced record gets a fresh capability, even at the same revision.
+    return _adoptPendingOwner(
+      pending,
+      before,
+      before?.pending != null || before?.credentialRevision != credentials,
+    );
+  }
+
+  Future<bool> cancelAuthorizationIfCurrent(
+    BankAuthorizationOwner expected,
+  ) async {
+    if (!isAuthorizationOwnerCurrent(expected)) return false;
+    final current = _coordinator.authorizationOwner!;
+    final pending = await _pendingStore.read();
+    if (!isAuthorizationOwnerCurrent(expected) ||
+        !identical(current, _coordinator.authorizationOwner)) {
+      return false;
+    }
+    final ownedPending = current.pending;
+    if (ownedPending == null && pending != null) return false;
+    if (ownedPending != null &&
+        (pending == null
+            ? !_coordinator.authorizationSaving
+            : !_samePending(ownedPending, pending))) {
+      return false;
+    }
+    if (expected.pending != null &&
+        (pending == null
+            ? !_coordinator.authorizationSaving ||
+                  ownedPending == null ||
+                  !_samePending(expected.pending!, ownedPending)
+            : !_samePending(expected.pending!, pending))) {
+      return false;
+    }
+    // Invalidate immediately so a blocked POST/save/callback cannot publish late.
+    _coordinator.invalidate();
+    await _coordinator.commit(() async {
+      final latest = await _pendingStore.read();
+      if (pending != null && latest != null && _samePending(pending, latest)) {
+        await _pendingStore.clear();
+      }
+    });
+    return true;
+  }
+
+  Future<AuthorizationLaunchResult> resumeAuthorization(
+    BankAuthorizationOwner expected, {
+    AuthorizationUrlLauncher? launcher,
+  }) async {
+    final current = await captureAuthorizationOwner();
+    final pending = current?.pending;
+    void check() {
+      if (current == null ||
+          !current.sameGeneration(expected) ||
+          !isAuthorizationOwnerCurrent(expected) ||
+          pending == null ||
+          pending.phase != PendingAuthorizationPhase.awaitingCallback ||
+          !pending.expiresAt.isAfter(_clock().toUtc())) {
+        throw const BankingException(
+          providerId: 'application',
+          failure: BankingFailure.rejected,
+        );
+      }
+    }
+
+    check();
+    final context = await _readContext();
+    check();
+    if (context.providerId != pending!.providerId ||
+        context.applicationId != pending.applicationId ||
+        context.redirectUri != pending.redirectUri) {
+      throw const BankingException(
+        providerId: 'application',
+        failure: BankingFailure.authentication,
+      );
+    }
+    final url = Uri.parse(pending.authorizationUrl);
+    if (url.scheme != 'https' || url.host.isEmpty || url.userInfo.isNotEmpty) {
+      throw const BankingException(
+        providerId: 'application',
+        failure: BankingFailure.invalidResponse,
+      );
+    }
+    await _checkCurrent(
+      expected.revision,
+      expected.credentialRevision,
+      context,
+      pending,
+    );
+    check();
+    final beforeLaunch = await _pendingStore.read();
+    check();
+    if (beforeLaunch == null || !_samePending(beforeLaunch, pending)) {
+      throw const BankingException(
+        providerId: 'application',
+        failure: BankingFailure.rejected,
+      );
+    }
+    final result = await launchAuthorization(url, launcher: launcher);
+    await _checkCurrent(
+      expected.revision,
+      expected.credentialRevision,
+      context,
+      pending,
+    );
+    check();
+    final latest = await _pendingStore.read();
+    check();
+    if (latest == null || !_samePending(latest, pending)) {
+      throw const BankingException(
+        providerId: 'application',
+        failure: BankingFailure.rejected,
+      );
+    }
+    return AuthorizationLaunchResult(
+      url: result.url,
+      opened: result.opened,
+      owner: current,
+    );
+  }
+
+  Future<bool> isFinalizedPending(PendingBankAuthorization expected) async {
+    final id = expected.stagedConnectionId;
+    if (id == null) return false;
+    final connection = await _connections.findById(id);
+    if (connection == null ||
+        connection.providerId != expected.providerId ||
+        connection.applicationId != expected.applicationId ||
+        connection.institutionName != expected.institutionName ||
+        connection.institutionCountry != expected.institutionCountry ||
+        (connection.status != BankConnectionStatus.disconnected &&
+            connection.status != BankConnectionStatus.revoked)) {
+      return false;
+    }
+    final latest = await _pendingStore.read();
+    return latest != null && _samePending(latest, expected);
+  }
+
+  Future<bool> retryPendingCleanup(PendingBankAuthorization expected) async {
+    try {
+      await _coordinator.commit(() async {
+        final latest = await _pendingStore.read();
+        if (latest != null && _samePending(latest, expected)) {
+          await _pendingStore.clear();
+        }
+      });
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<BankDisconnectFinalization> _finishedDisconnect(
+    BankConnection finalized,
+    BankConnection expected,
+    PendingBankAuthorization? pending,
+  ) async {
+    if (pending != null && _pendingOwns(pending, expected)) {
+      try {
+        await _clearOwnedPending(pending);
+      } catch (_) {
+        return BankDisconnectFinalization(
+          connection: finalized,
+          pendingCleanup: pending,
+        );
+      }
+    }
+    return BankDisconnectFinalization(connection: finalized);
+  }
+
+  Future<void> cancelAuthorization() {
+    _coordinator.invalidate();
+    return _coordinator.commit(() => _pendingStore.clear());
+  }
+
+  Future<bool> clearExpiredAuthorization() => _coordinator.commit(() async {
     final pending = await _pendingStore.read();
     if (pending == null || pending.expiresAt.isAfter(_clock().toUtc())) {
       return false;
     }
+    _coordinator.invalidate();
     await _pendingStore.clear();
     return true;
-  }
+  });
 
   Future<StagedBankConnection> completeCallback(
     BankAuthorizationCallback callback,
   ) {
-    final completer = Completer<void>();
-    final previous = _callbackQueue;
-    _callbackQueue = previous.then((_) => completer.future);
-    return previous.then((_) async {
-      try {
-        return await _completeCallback(callback);
-      } finally {
-        completer.complete();
-      }
-    });
+    final revision = _coordinator.revision;
+    final credentials = _credentialRevision?.call();
+    return _coordinator.completeCallback((
+      callback.state,
+      callback.code,
+      callback.error,
+      revision,
+      credentials,
+    ), () => _completeCallback(callback, revision, credentials));
   }
 
   Future<BankCallbackDisposition> handleCallback(
@@ -210,8 +654,22 @@ class BankConsentLifecycleService {
     Future<void> Function(StagedBankConnection result)? onStaged,
     Future<void> Function(Object error)? onError,
   }) async {
+    final revision = _coordinator.revision;
+    final credentials = _credentialRevision?.call();
     try {
       final staged = await completeCallback(callback);
+      await _checkCurrent(revision, credentials);
+      _assertCurrent(revision, credentials);
+      final context = await _readContext();
+      await _checkCurrent(revision, credentials, context);
+      _assertCurrent(revision, credentials);
+      if (staged.connection.providerId != context.providerId ||
+          staged.connection.applicationId != context.applicationId) {
+        throw const BankingException(
+          providerId: 'application',
+          failure: BankingFailure.authentication,
+        );
+      }
       if (onStaged != null) await onStaged(staged);
       return BankCallbackDisposition.terminal;
     } on BankingException catch (error) {
@@ -227,8 +685,14 @@ class BankConsentLifecycleService {
 
   Future<StagedBankConnection> _completeCallback(
     BankAuthorizationCallback callback,
+    int revision,
+    int? credentials,
   ) async {
+    await _checkCurrent(revision, credentials);
+    _assertCurrent(revision, credentials);
     final pending = await _pendingStore.read();
+    await _checkCurrent(revision, credentials);
+    _assertCurrent(revision, credentials);
     if (pending == null) {
       throw const BankingException(
         providerId: 'application',
@@ -242,14 +706,14 @@ class BankConsentLifecycleService {
       );
     }
     if (!pending.expiresAt.isAfter(_clock().toUtc())) {
-      await _pendingStore.clear();
+      await _clearOwnedPending(pending);
       throw const BankingException(
         providerId: 'application',
         failure: BankingFailure.connectionExpired,
       );
     }
     if (callback.error != null) {
-      await _pendingStore.clear();
+      await _clearOwnedPending(pending);
       throw const BankingException(
         providerId: 'application',
         failure: BankingFailure.rejected,
@@ -263,6 +727,8 @@ class BankConsentLifecycleService {
     }
 
     final context = await _readContext();
+    await _checkCurrent(revision, credentials, context, pending);
+    _assertCurrent(revision, credentials);
     if (context.providerId != pending.providerId ||
         context.applicationId != pending.applicationId ||
         context.redirectUri != pending.redirectUri) {
@@ -273,68 +739,604 @@ class BankConsentLifecycleService {
     }
 
     if (pending.stagedConnectionId case final id?) {
-      return StagedBankConnection(
-        connection: await _connections.selectById(id),
-      );
+      final connection = await _connections.selectById(id);
+      await _checkCurrent(revision, credentials, context, pending);
+      _assertCurrent(revision, credentials);
+      if (!_pendingOwns(pending, connection) ||
+          connection.pendingRemoteConnectionId == null ||
+          !{
+            BankConnectionStatus.awaitingImport,
+            BankConnectionStatus.active,
+            BankConnectionStatus.expired,
+            BankConnectionStatus.reauthRequired,
+          }.contains(connection.status)) {
+        throw const BankingException(
+          providerId: 'application',
+          failure: BankingFailure.rejected,
+        );
+      }
+      return StagedBankConnection(connection: connection);
     }
     final durable = await _connections.findByPendingAuthorizationId(
       pending.authorizationId,
       providerId: pending.providerId,
     );
+    await _checkCurrent(revision, credentials, context, pending);
+    _assertCurrent(revision, credentials);
     if (durable != null) {
-      await _pendingStore.save(
+      if (!_pendingOwns(pending, durable)) {
+        throw const BankingException(
+          providerId: 'application',
+          failure: BankingFailure.rejected,
+        );
+      }
+      await _savePending(
         pending.copy(
           stagedConnectionId: durable.id,
           phase: PendingAuthorizationPhase.connectionStaged,
         ),
+        revision,
+        credentials,
+        context,
       );
+      await _checkCurrent(revision, credentials, context, pending);
+      _assertCurrent(revision, credentials);
       return StagedBankConnection(connection: durable);
     }
 
-    final result = await _consent.createConnection(callback.code!);
-    if (result.connection.reference.providerId != pending.providerId ||
-        result.connection.institution.providerId != pending.providerId ||
-        result.connection.reference.remoteId.trim().isEmpty ||
-        result.connection.status != BankingConnectionStatus.active ||
-        !result.connection.validUntil.isAfter(_clock().toUtc()) ||
-        !result.connection.institution.customerTypes.contains(
-          BankingCustomerType.personal,
-        ) ||
-        result.connection.institution.name != pending.institutionName ||
-        result.connection.institution.country != pending.institutionCountry) {
-      throw const BankingException(
-        providerId: 'application',
-        failure: BankingFailure.invalidResponse,
+    final journal = _recoveryStore;
+    BankSessionRecoveryRecord? receipt;
+    if (journal != null) {
+      final existing = (await journal.read()).where(
+        (record) =>
+            record.providerId == pending.providerId &&
+            record.applicationId == pending.applicationId &&
+            record.authorizationId == pending.authorizationId,
+      );
+      if (existing.isNotEmpty) throw const BankSessionOutcomeUnknownException();
+      receipt = BankSessionRecoveryRecord(
+        providerId: pending.providerId,
+        applicationId: pending.applicationId,
+        authorizationId: pending.authorizationId,
+        reconnectConnectionId: pending.reconnectConnectionId,
+        phase: BankSessionRecoveryPhase.exchangeStarted,
+        updatedAt: _clock().toUtc(),
+      );
+      if (!await journal.upsert(receipt)) {
+        throw const BankSessionOutcomeUnknownException();
+      }
+    }
+    BankingConnectionReference? captured;
+    BankConnection? committed;
+    try {
+      await _checkCurrent(revision, credentials, context, pending);
+      Future<void> onReference(BankingConnectionReference reference) async {
+        captured = reference;
+        if (journal != null) {
+          final known = receipt!.copy(
+            phase: BankSessionRecoveryPhase.knownSession,
+            remoteConnectionId: reference.remoteId,
+            updatedAt: _clock().toUtc(),
+          );
+          if (!await journal.upsert(known, expected: receipt)) {
+            throw const BankSessionRecoveryStorageException();
+          }
+          receipt = known;
+        }
+      }
+
+      final consent = _consent;
+      final result = consent is BankConnectionReceiptSource
+          ? await (consent as BankConnectionReceiptSource)
+                .createConnectionWithReceipt(callback.code!, onReference)
+          : await consent.createConnection(callback.code!);
+      if (captured == null) await onReference(result.connection.reference);
+      await _checkCurrent(revision, credentials, context, pending);
+      _assertCurrent(revision, credentials);
+      if (result.connection.reference.providerId != pending.providerId ||
+          result.connection.institution.providerId != pending.providerId ||
+          result.connection.reference.remoteId.trim().isEmpty ||
+          result.connection.status != BankingConnectionStatus.active ||
+          !result.connection.validUntil.isAfter(_clock().toUtc()) ||
+          !result.connection.institution.customerTypes.contains(
+            BankingCustomerType.personal,
+          ) ||
+          result.connection.institution.name != pending.institutionName ||
+          result.connection.institution.country != pending.institutionCountry) {
+        throw const BankingException(
+          providerId: 'application',
+          failure: BankingFailure.invalidResponse,
+        );
+      }
+      final connection = await _coordinator.commit(() async {
+        await _checkCurrent(revision, credentials, context, pending);
+        _assertCurrent(revision, credentials);
+        BankConnection? staged;
+        try {
+          staged = await _connections.stageConnection(
+            providerId: pending.providerId,
+            authorizationId: pending.authorizationId,
+            applicationId: pending.applicationId,
+            institutionName: result.connection.institution.name,
+            institutionCountry: result.connection.institution.country,
+            remoteConnectionId: result.connection.reference.remoteId,
+            validUntil: result.connection.validUntil,
+            psuType: 'personal',
+            reconnectConnectionId: pending.reconnectConnectionId,
+            isAuthorizationCurrent: () => _isCurrent(revision, credentials),
+          );
+          committed = staged;
+          await _checkCurrent(revision, credentials, context, pending);
+          _assertCurrent(revision, credentials);
+          final stagedPending = pending.copy(
+            stagedConnectionId: staged.id,
+            phase: PendingAuthorizationPhase.connectionStaged,
+          );
+          _adoptPendingOwner(stagedPending);
+          _coordinator.authorizationSaving = true;
+          try {
+            await _pendingStore.save(stagedPending);
+          } finally {
+            _coordinator.authorizationSaving = false;
+          }
+          await _checkCurrent(revision, credentials, context, pending);
+          _assertCurrent(revision, credentials);
+          return staged;
+        } catch (_) {
+          if (staged?.id case final id?) {
+            await _connections.discardAuthorizationStaging(
+              id,
+              pending.authorizationId,
+              result.connection.reference.remoteId,
+              expectedStaging: staged,
+            );
+          }
+          rethrow;
+        }
+      });
+      committed = connection;
+      await _checkCurrent(revision, credentials, context, pending);
+      _assertCurrent(revision, credentials);
+      return StagedBankConnection(
+        connection: connection,
+        createdConnection: result,
+      );
+    } catch (_) {
+      if (captured == null) {
+        if (journal != null) throw const BankSessionOutcomeUnknownException();
+        rethrow;
+      }
+      throw await _obsoleteConnection(
+        pending,
+        captured!,
+        revision,
+        credentials,
+        context,
+        discardLocal: () async {
+          if (committed?.id case final id?) {
+            await _connections.discardAuthorizationStaging(
+              id,
+              pending.authorizationId,
+              captured!.remoteId,
+              expectedStaging: committed,
+            );
+          }
+          await _clearOwnedPending(
+            pending,
+            allowedStagedConnectionId: committed?.id,
+          );
+        },
+        receipt: receipt,
       );
     }
-    final connection = await _connections.stageConnection(
-      providerId: pending.providerId,
-      authorizationId: pending.authorizationId,
+  }
+
+  Future<ObsoleteBankAuthorizationException> _obsoleteConnection(
+    PendingBankAuthorization pending,
+    BankingConnectionReference result,
+    int revision,
+    int? credentials,
+    BankAuthorizationContext context, {
+    required Future<void> Function() discardLocal,
+    BankSessionRecoveryRecord? receipt,
+  }) async {
+    final reference = ObsoleteBankConnection(
+      providerId: result.providerId,
       applicationId: pending.applicationId,
-      institutionName: result.connection.institution.name,
-      institutionCountry: result.connection.institution.country,
-      remoteConnectionId: result.connection.reference.remoteId,
-      validUntil: result.connection.validUntil,
-      psuType: 'personal',
-      reconnectConnectionId: pending.reconnectConnectionId,
+      authorizationId: pending.authorizationId,
+      remoteConnectionId: result.remoteId,
+      attemptRevision: revision,
+      reason: 'authorization_invalidated',
     );
-    await _pendingStore.save(
-      pending.copy(
-        stagedConnectionId: connection.id,
-        phase: PendingAuthorizationPhase.connectionStaged,
+    final unresolved = _coordinator.unresolvedConnections;
+    if (!unresolved.any((value) => value.sameConnection(reference))) {
+      unresolved.add(reference);
+    }
+    final store = _pendingStore;
+    var journalPersisted = false;
+    var legacyPersisted = false;
+    var confirmed = false;
+    final journal = _recoveryStore;
+    if (journal != null && receipt != null) {
+      try {
+        final required = receipt.copy(
+          phase: BankSessionRecoveryPhase.cleanupRequired,
+          remoteConnectionId: result.remoteId,
+          updatedAt: _clock().toUtc(),
+        );
+        if (await journal.upsert(required, expected: receipt)) {
+          receipt = required;
+        }
+        journalPersisted = (await journal.read()).any(
+          (record) =>
+              record.sameAttempt(receipt!) &&
+              record.remoteConnectionId == result.remoteId,
+        );
+      } catch (_) {}
+    }
+    if (store is BankAuthorizationCleanupStore) {
+      try {
+        await (store as BankAuthorizationCleanupStore).saveObsoleteConnection(
+          reference,
+        );
+        legacyPersisted = true;
+      } catch (_) {}
+    }
+    var localCleanupConfirmed = true;
+    try {
+      await discardLocal();
+    } catch (_) {
+      localCleanupConfirmed = false;
+    }
+    try {
+      final handler = _cleanupObsoleteConnection;
+      if (handler != null) {
+        confirmed = await handler(reference);
+      } else {
+        final current = await _readContext();
+        if (reference.providerId == context.providerId &&
+            reference.remoteConnectionId.isNotEmpty &&
+            current.providerId == context.providerId &&
+            current.applicationId == context.applicationId &&
+            credentials == _credentialRevision?.call()) {
+          await _consent.revokeConnection(
+            BankingConnectionReference(
+              providerId: reference.providerId,
+              remoteId: reference.remoteConnectionId,
+            ),
+          );
+          confirmed = true;
+        }
+      }
+    } on BankingException catch (error) {
+      confirmed = error.confirmsMissingConnection;
+    } catch (_) {}
+    if (confirmed) {
+      if (store is BankAuthorizationCleanupStore) {
+        try {
+          await (store as BankAuthorizationCleanupStore)
+              .removeObsoleteConnection(reference);
+          legacyPersisted = false;
+        } catch (_) {}
+      }
+      if (journal != null && receipt != null) {
+        try {
+          if (await journal.removeIfCurrent(receipt)) journalPersisted = false;
+        } catch (_) {}
+      }
+      unresolved.removeWhere((value) => value.sameConnection(reference));
+    }
+    return ObsoleteBankAuthorizationException(
+      connection: reference,
+      cleanupConfirmed: confirmed,
+      referencePersisted: journalPersisted || legacyPersisted,
+      localCleanupConfirmed: localCleanupConfirmed,
+    );
+  }
+
+  Future<BankSessionRecoveryReport> recoverSessions() {
+    final existing = _recovery;
+    if (existing != null) return existing;
+    final operation = _coordinator.callback(_recoverSessions);
+    _recovery = operation;
+    unawaited(
+      operation.then<void>(
+        (_) {
+          if (identical(_recovery, operation)) _recovery = null;
+        },
+        onError: (Object _, StackTrace _) {
+          if (identical(_recovery, operation)) _recovery = null;
+        },
       ),
     );
-    return StagedBankConnection(
-      connection: connection,
-      createdConnection: result,
+    return operation;
+  }
+
+  Future<BankSessionRecoveryReport> _recoverSessions() async {
+    var unknown = 0;
+    var confirmed = 0;
+    var failed = 0;
+    var unavailable = 0;
+    var notPersisted = 0;
+    final journal = _recoveryStore;
+    final records = await journal?.read() ?? <BankSessionRecoveryRecord>[];
+    final legacy = _pendingStore;
+    final legacyRecords = legacy is BankAuthorizationCleanupStore
+        ? await (legacy as BankAuthorizationCleanupStore)
+              .readObsoleteConnections()
+        : <ObsoleteBankConnection>[];
+    final obligations = <ObsoleteBankConnection>[...legacyRecords];
+    for (final reference in _coordinator.unresolvedConnections) {
+      if (!obligations.any((item) => item.sameConnection(reference))) {
+        obligations.add(reference);
+      }
+    }
+    for (final record in records) {
+      if (record.remoteConnectionId == null) {
+        if (!obligations.any(
+          (item) =>
+              item.providerId == record.providerId &&
+              item.applicationId == record.applicationId &&
+              item.authorizationId == record.authorizationId,
+        )) {
+          unknown++;
+        }
+        continue;
+      }
+      final reference = ObsoleteBankConnection(
+        providerId: record.providerId,
+        applicationId: record.applicationId,
+        authorizationId: record.authorizationId,
+        remoteConnectionId: record.remoteConnectionId!,
+        attemptRevision: 0,
+        reason: 'session_recovery',
+      );
+      if (!obligations.any((item) => item.sameConnection(reference))) {
+        obligations.add(reference);
+      }
+    }
+    for (final reference in obligations) {
+      final matching = records
+          .where(
+            (record) =>
+                record.providerId == reference.providerId &&
+                record.applicationId == reference.applicationId &&
+                (record.remoteConnectionId == reference.remoteConnectionId ||
+                    (record.remoteConnectionId == null &&
+                        record.authorizationId == reference.authorizationId)),
+          )
+          .toList();
+      final persisted =
+          matching.any((record) => record.remoteConnectionId != null) ||
+          legacyRecords.any((item) => item.sameConnection(reference));
+      BankConnection? claimed;
+      BankConnectionStatus? restoreStatus;
+      final decision = await _coordinator.commit(() async {
+        final connections = (await _connections.selectAll())
+            .where(
+              (connection) =>
+                  connection.providerId == reference.providerId &&
+                  connection.applicationId == reference.applicationId,
+            )
+            .toList();
+        Future<String> retain() async {
+          for (final record in matching) {
+            await journal!.removeIfCurrent(record);
+          }
+          if (legacy is BankAuthorizationCleanupStore) {
+            await (legacy as BankAuthorizationCleanupStore)
+                .removeObsoleteConnection(reference);
+          }
+          _coordinator.unresolvedConnections.removeWhere(
+            (item) => item.sameConnection(reference),
+          );
+          return 'retained';
+        }
+
+        if (connections.any(
+          (connection) =>
+              connection.remoteConnectionId == reference.remoteConnectionId &&
+              connection.status != BankConnectionStatus.revocationPending,
+        )) {
+          return retain();
+        }
+        final staged = connections.where(
+          (connection) =>
+              connection.pendingRemoteConnectionId ==
+              reference.remoteConnectionId,
+        );
+        BankAuthorizationContext context;
+        try {
+          context = await _readContext();
+        } catch (_) {
+          return 'owner';
+        }
+        if (context.providerId != reference.providerId ||
+            context.applicationId != reference.applicationId) {
+          return 'owner';
+        }
+        if (staged.isEmpty) return 'cleanup';
+        var connection = staged.first;
+        final pending = await _pendingStore.read();
+        // Activation may have completed while secure storage was being read.
+        final latest = await _connections.findById(connection.id!);
+        if (latest == null || !latest.sameLifecycle(connection)) return 'stale';
+        connection = latest;
+        if (matching.any(
+              (record) =>
+                  record.phase != BankSessionRecoveryPhase.cleanupRequired,
+            ) &&
+            pending != null &&
+            _pendingOwns(pending, connection) &&
+            connection.pendingAuthorizationId == reference.authorizationId &&
+            {
+              BankConnectionStatus.awaitingImport,
+              BankConnectionStatus.active,
+              BankConnectionStatus.expired,
+              BankConnectionStatus.reauthRequired,
+            }.contains(connection.status)) {
+          await _pendingStore.save(
+            pending.copy(
+              stagedConnectionId: connection.id,
+              phase: PendingAuthorizationPhase.connectionStaged,
+            ),
+          );
+          return retain();
+        }
+        // A previous cleanup claim must not become the status restored after a restart.
+        final savedStatuses = matching
+            .map((record) => record.restoreStatus)
+            .whereType<BankConnectionStatus>()
+            .toSet();
+        if (savedStatuses.length > 1) {
+          throw const BankSessionRecoveryStorageException();
+        }
+        restoreStatus =
+            connection.status == BankConnectionStatus.revocationPending &&
+                savedStatuses.isNotEmpty
+            ? savedStatuses.single
+            : connection.status;
+        // Persist before SQL so interruption immediately after the claim retains the original status, including for a legacy-only obligation.
+        if (journal == null) return 'persistence';
+        final previous = matching
+            .where(
+              (record) => record.authorizationId == reference.authorizationId,
+            )
+            .firstOrNull;
+        final recovery =
+            (previous ??
+                    BankSessionRecoveryRecord(
+                      providerId: reference.providerId,
+                      applicationId: reference.applicationId,
+                      authorizationId: reference.authorizationId,
+                      remoteConnectionId: reference.remoteConnectionId,
+                      phase: BankSessionRecoveryPhase.cleanupRequired,
+                      updatedAt: _clock().toUtc(),
+                    ))
+                .copy(
+                  phase: BankSessionRecoveryPhase.cleanupRequired,
+                  remoteConnectionId: reference.remoteConnectionId,
+                  restoreStatus: restoreStatus,
+                  updatedAt: _clock().toUtc(),
+                );
+        if (!await journal.upsert(recovery, expected: previous)) return 'stale';
+        if (previous != null) matching.remove(previous);
+        matching.add(recovery);
+        claimed = await _connections.markStatusIfCurrent(
+          connection,
+          BankConnectionStatus.revocationPending,
+          clock: _clock,
+        );
+        return claimed == null ? 'stale' : 'cleanup';
+      });
+      if (decision == 'stale') {
+        failed++;
+        if (!persisted) notPersisted++;
+        continue;
+      }
+      if (decision == 'persistence') {
+        failed++;
+        if (!persisted) notPersisted++;
+        continue;
+      }
+      if (decision == 'owner') {
+        unavailable++;
+        if (!persisted) notPersisted++;
+        continue;
+      }
+      if (decision == 'retained') continue;
+      final credentials = _credentialRevision?.call();
+      var deleted = false;
+      try {
+        final handler = _cleanupObsoleteConnection;
+        if (handler != null) {
+          deleted = await handler(reference);
+        } else {
+          final current = await _readContext();
+          if (current.providerId == reference.providerId &&
+              current.applicationId == reference.applicationId &&
+              credentials == _credentialRevision?.call()) {
+            await _consent.revokeConnection(
+              BankingConnectionReference(
+                providerId: reference.providerId,
+                remoteId: reference.remoteConnectionId,
+              ),
+            );
+            deleted = true;
+          }
+        }
+      } on BankingException catch (error) {
+        deleted = error.confirmsMissingConnection;
+      } catch (_) {}
+      if (!deleted) {
+        failed++;
+        if (!persisted) notPersisted++;
+        continue;
+      }
+      try {
+        if (claimed != null) {
+          if (claimed!.remoteConnectionId == null) {
+            await _connections.failStagedConnectionIfCurrent(
+              claimed!,
+              BankConnectionStatus.revoked,
+              clock: _clock,
+            );
+          } else {
+            await _connections.discardStagedConnectionIfCurrent(
+              claimed!,
+              restoreStatus: restoreStatus,
+              clock: _clock,
+            );
+          }
+        }
+        for (final record in matching) {
+          await journal!.removeIfCurrent(record);
+        }
+        if (legacy is BankAuthorizationCleanupStore) {
+          await (legacy as BankAuthorizationCleanupStore)
+              .removeObsoleteConnection(reference);
+        }
+        _coordinator.unresolvedConnections.removeWhere(
+          (item) => item.sameConnection(reference),
+        );
+        confirmed++;
+      } catch (_) {
+        failed++;
+      }
+    }
+    return BankSessionRecoveryReport(
+      unknown: unknown,
+      cleanupConfirmed: confirmed,
+      retryFailed: failed,
+      ownerUnavailable: unavailable,
+      notPersisted: notPersisted,
     );
   }
 
   Future<BankConnection> activateConnection(
     int connectionId,
-    List<({BankingAccount remote, BankAccount? newAccount})> selections,
-  ) async {
-    final staged = await _connections.selectById(connectionId);
+    List<({BankingAccount remote, BankAccount? newAccount})> selections, {
+    BankConnection? expectedStaging,
+  }) async {
+    if (expectedStaging == null || expectedStaging.id != connectionId) {
+      throw const BankingException(
+        providerId: 'application',
+        failure: BankingFailure.rejected,
+      );
+    }
+    final revision = _coordinator.revision;
+    final credentials = _credentialRevision?.call();
+    final pending = await _pendingStore.read();
+    final context = await _readContext();
+    await _checkCurrent(revision, credentials, context);
+    final staged = expectedStaging;
+    if (context.providerId != staged.providerId ||
+        context.applicationId != staged.applicationId) {
+      throw const BankingException(
+        providerId: 'application',
+        failure: BankingFailure.authentication,
+      );
+    }
     if (selections.any(
       (selection) => selection.remote.reference.providerId != staged.providerId,
     )) {
@@ -367,78 +1369,201 @@ class BankConsentLifecycleService {
           ),
         )
         .toList(growable: false);
-    final connection = await _connections.activateStagedConnection(
-      connectionId,
-      links,
-    );
-    final pending = await _pendingStore.read();
-    if (pending?.stagedConnectionId == connectionId) {
-      await _pendingStore.clear();
+    BankSessionRecoveryRecord? retired;
+    final journal = _recoveryStore;
+    final connection = await _coordinator.commit(() async {
+      await _checkCurrent(revision, credentials, context);
+      if (staged.remoteConnectionId != null &&
+          staged.remoteConnectionId != staged.pendingRemoteConnectionId) {
+        if (journal == null) throw const BankSessionRecoveryStorageException();
+        retired = BankSessionRecoveryRecord(
+          providerId: staged.providerId,
+          applicationId: staged.applicationId,
+          authorizationId: 'retired:${staged.pendingAuthorizationId!}',
+          remoteConnectionId: staged.remoteConnectionId,
+          phase: BankSessionRecoveryPhase.knownSession,
+          updatedAt: _clock().toUtc(),
+        );
+        final existing = (await journal.read()).where(
+          (record) => record.sameAttempt(retired!),
+        );
+        if (existing.isNotEmpty) {
+          retired = existing.single;
+        } else if (!await journal.upsert(retired!)) {
+          throw const BankSessionRecoveryStorageException();
+        }
+      }
+      try {
+        return await _connections.activateStagedConnection(
+          connectionId,
+          links,
+          expectedStaging: staged,
+          clock: _clock,
+          isAuthorizationCurrent: () => _isCurrent(revision, credentials),
+        );
+      } catch (_) {
+        if (retired != null) {
+          try {
+            await journal!.removeIfCurrent(retired!);
+          } catch (_) {}
+        }
+        rethrow;
+      }
+    });
+    if (pending != null && _pendingOwns(pending, staged)) {
+      await _clearOwnedPending(pending);
+    }
+    if (retired != null) {
+      try {
+        await recoverSessions();
+      } catch (_) {}
     }
     return connection;
   }
 
-  Future<List<ResumableBankConnection>> resumeAwaitingImports() async {
+  bool _pendingOwns(
+    PendingBankAuthorization pending,
+    BankConnection connection,
+  ) =>
+      pending.providerId == connection.providerId &&
+      pending.applicationId == connection.applicationId &&
+      pending.authorizationId == connection.pendingAuthorizationId &&
+      (pending.stagedConnectionId == connection.id ||
+          pending.stagedConnectionId == null);
+
+  Future<bool> _snapshotCurrent(BankConnection connection) async =>
+      (await _connections.findById(
+        connection.id!,
+      ))?.sameLifecycle(connection) ??
+      false;
+
+  Future<List<ResumableBankConnection>> resumeAwaitingImports({
+    BankConnection? expectedStaging,
+    void Function(BankConnection settled, BankingFailure? failure)? onRejected,
+  }) async {
+    final revision = _coordinator.revision;
+    final credentials = _credentialRevision?.call();
     final result = <ResumableBankConnection>[];
     for (final connection in await _connections.selectAwaitingImport()) {
-      final remoteConnectionId = connection.pendingRemoteConnectionId;
-      if (remoteConnectionId == null) continue;
+      if (expectedStaging != null &&
+          !connection.sameLifecycle(expectedStaging)) {
+        continue;
+      }
+      if (!{
+        BankConnectionStatus.awaitingImport,
+        BankConnectionStatus.active,
+        BankConnectionStatus.expired,
+        BankConnectionStatus.reauthRequired,
+      }.contains(connection.status)) {
+        continue;
+      }
+      final remoteId = connection.pendingRemoteConnectionId!;
+      final pending = await _pendingStore.read();
       try {
-        final details = await _consent.getConnection(
-          await _reference(connection, remoteConnectionId),
-        );
-        final localStatus =
+        await _checkCurrent(revision, credentials);
+        final reference = await _reference(connection, remoteId);
+        _assertCurrent(revision, credentials);
+        final details = await _consent.getConnection(reference);
+        await _reference(connection, remoteId);
+        await _checkCurrent(revision, credentials);
+        if (!await _snapshotCurrent(connection)) continue;
+        if (details.reference.providerId != connection.providerId ||
+            details.reference.remoteId != remoteId) {
+          throw const BankingException(
+            providerId: 'application',
+            failure: BankingFailure.invalidResponse,
+          );
+        }
+        if (details.status == BankingConnectionStatus.pending) continue;
+        final status =
             details.status == BankingConnectionStatus.active &&
-                details.isExpiredAt(_clock().toUtc())
+                (details.isExpiredAt(_clock().toUtc()) ||
+                    !connection.pendingValidUntil!.isAfter(_clock().toUtc()))
             ? BankConnectionStatus.expired
             : _localStatus(details.status);
-        if (localStatus != BankConnectionStatus.awaitingImport) {
-          await _rejectStagedConnection(connection, localStatus);
+        if (status != BankConnectionStatus.awaitingImport) {
+          final settled = await _rejectStagedConnection(
+            connection,
+            status,
+            pending,
+          );
+          if (settled != null) onRejected?.call(settled, null);
           continue;
         }
-        result.add(
-          ResumableBankConnection(connection: connection, details: details),
-        );
+        if (await _snapshotCurrent(connection)) {
+          result.add(
+            ResumableBankConnection(connection: connection, details: details),
+          );
+        }
       } on BankingException catch (error) {
-        final status = _statusForFailure(error.failure);
-        if (status != null) {
-          await _rejectStagedConnection(connection, status);
+        if (!_isCurrent(revision, credentials) ||
+            !await _snapshotCurrent(connection)) {
           continue;
         }
-        rethrow;
+        final status = _statusForFailure(error.failure);
+        if (status == null) rethrow;
+        final settled = await _rejectStagedConnection(
+          connection,
+          status,
+          pending,
+        );
+        if (settled != null) onRejected?.call(settled, error.failure);
       }
     }
     return result;
   }
 
-  Future<void> _rejectStagedConnection(
+  Future<BankConnection?> _rejectStagedConnection(
     BankConnection connection,
     BankConnectionStatus failedStatus,
+    PendingBankAuthorization? pending,
   ) async {
-    final id = connection.id!;
-    if (connection.remoteConnectionId == null ||
-        failedStatus == BankConnectionStatus.reauthRequired) {
-      await _connections.failStagedConnection(id, failedStatus);
-    } else {
-      await _connections.discardStagedConnection(id);
+    final changed =
+        connection.remoteConnectionId == null ||
+            failedStatus == BankConnectionStatus.reauthRequired
+        ? await _connections.failStagedConnectionIfCurrent(
+            connection,
+            failedStatus,
+            clock: _clock,
+          )
+        : await _connections.discardStagedConnectionIfCurrent(
+            connection,
+            clock: _clock,
+          );
+    if (changed != null &&
+        pending != null &&
+        _pendingOwns(pending, connection)) {
+      await _clearOwnedPending(pending);
     }
-    final pending = await _pendingStore.read();
-    if (pending?.stagedConnectionId == id) await _pendingStore.clear();
+    return changed;
   }
 
   Future<BankConnectionStatus> refreshConnectionState(
     BankConnection connection,
   ) async {
-    final id = connection.id;
-    final remoteConnectionId = connection.remoteConnectionId;
-    if (id == null || remoteConnectionId == null) {
+    if (connection.id == null || connection.remoteConnectionId == null) {
       return connection.status;
     }
+    final revision = _coordinator.revision;
+    final credentials = _credentialRevision?.call();
+    BankConnectionStatus status;
     try {
-      final details = await _consent.getConnection(
-        await _reference(connection, remoteConnectionId),
+      final reference = await _reference(
+        connection,
+        connection.remoteConnectionId!,
       );
-      final status = switch (details.status) {
+      _assertCurrent(revision, credentials);
+      final details = await _consent.getConnection(reference);
+      await _reference(connection, connection.remoteConnectionId!);
+      await _checkCurrent(revision, credentials);
+      if (details.reference.providerId != connection.providerId ||
+          details.reference.remoteId != connection.remoteConnectionId) {
+        throw const BankingException(
+          providerId: 'application',
+          failure: BankingFailure.invalidResponse,
+        );
+      }
+      status = switch (details.status) {
         BankingConnectionStatus.active =>
           details.validUntil.isAfter(_clock().toUtc())
               ? BankConnectionStatus.active
@@ -450,59 +1575,130 @@ class BankConsentLifecycleService {
         BankingConnectionStatus.invalid => BankConnectionStatus.reauthRequired,
         BankingConnectionStatus.pending => BankConnectionStatus.authorizing,
       };
-      await _connections.markStatus(id, status);
-      return status;
     } on BankingException catch (error) {
-      final status = _statusForFailure(error.failure);
-      if (status == null) rethrow;
-      await _connections.markStatus(id, status);
-      return status;
+      if (!_isCurrent(revision, credentials)) {
+        return (await _connections.selectById(connection.id!)).status;
+      }
+      final mapped = _statusForFailure(error.failure);
+      if (mapped == null) rethrow;
+      status = mapped;
     }
+    final changed = await _connections.markStatusIfCurrent(
+      connection,
+      status,
+      clock: _clock,
+    );
+    return changed?.status ??
+        (await _connections.selectById(connection.id!)).status;
   }
 
-  Future<void> revoke(BankConnection connection) async {
+  Future<BankDisconnectFinalization> revoke(BankConnection connection) async {
     if (connection.id == null) {
       throw const BankingException(
         providerId: 'application',
         failure: BankingFailure.rejected,
       );
     }
-    final current = await _connections.selectById(connection.id!);
-    final remoteIds = {
-      if (current.pendingRemoteConnectionId != null)
-        current.pendingRemoteConnectionId!,
-      if (current.remoteConnectionId != null) current.remoteConnectionId!,
+    final revision = _coordinator.revision;
+    final credentials = _credentialRevision?.call();
+    final pending = await _pendingStore.read();
+    final ids = {
+      if (connection.pendingRemoteConnectionId != null)
+        connection.pendingRemoteConnectionId!,
+      if (connection.remoteConnectionId != null) connection.remoteConnectionId!,
     };
-    if (remoteIds.isEmpty) {
+    if (ids.isEmpty) {
       throw const BankingException(
         providerId: 'application',
         failure: BankingFailure.rejected,
       );
     }
-    await _connections.markStatus(
-      current.id!,
+    for (final id in ids) {
+      await _reference(connection, id);
+    }
+    await _checkCurrent(revision, credentials);
+    final revoking = await _connections.markStatusIfCurrent(
+      connection,
       BankConnectionStatus.revocationPending,
+      clock: _clock,
     );
-    for (final remoteId in remoteIds) {
+    if (revoking == null) {
+      throw const BankingException(
+        providerId: 'application',
+        failure: BankingFailure.rejected,
+      );
+    }
+    for (final id in ids) {
+      await _checkCurrent(revision, credentials);
+      if (!await _snapshotCurrent(revoking)) {
+        throw const BankingException(
+          providerId: 'application',
+          failure: BankingFailure.rejected,
+        );
+      }
       try {
-        await _consent.revokeConnection(await _reference(current, remoteId));
+        final reference = await _reference(connection, id);
+        _assertCurrent(revision, credentials);
+        final handler = _cleanupObsoleteConnection;
+        if (handler != null) {
+          final deleted = await handler(
+            ObsoleteBankConnection(
+              providerId: connection.providerId,
+              applicationId: connection.applicationId,
+              authorizationId: connection.pendingAuthorizationId ?? 'revoke',
+              remoteConnectionId: id,
+              attemptRevision: revision,
+              reason: 'remote_revocation',
+            ),
+          );
+          if (!deleted) {
+            throw const BankingException(
+              providerId: 'application',
+              failure: BankingFailure.authentication,
+            );
+          }
+        } else {
+          await _consent.revokeConnection(reference);
+        }
       } on BankingException catch (error) {
         if (!error.confirmsMissingConnection) rethrow;
       }
     }
-    await _connections.finalizeRemoteRevocation(current.id!);
-    final pending = await _pendingStore.read();
-    if (pending?.stagedConnectionId == current.id) await _pendingStore.clear();
+    await _checkCurrent(revision, credentials);
+    final changed = await _connections.finalizeRemoteRevocationIfCurrent(
+      revoking,
+      clock: _clock,
+    );
+    if (changed == null) {
+      throw const BankingException(
+        providerId: 'application',
+        failure: BankingFailure.rejected,
+      );
+    }
+    return _finishedDisconnect(changed, connection, pending);
   }
 
-  Future<void> disconnectLocally(BankConnection connection) async {
+  Future<BankDisconnectFinalization> disconnectLocally(
+    BankConnection connection,
+  ) async {
     if (connection.id == null) {
       throw const BankingException(
         providerId: 'application',
         failure: BankingFailure.rejected,
       );
     }
-    await _connections.disconnectLocally(connection.id!);
+    final pending = await _pendingStore.read();
+    final changed = await _connections.disconnectLocallyIfCurrent(
+      connection,
+      clock: _clock,
+    );
+    if (changed == null) {
+      throw const BankingException(
+        providerId: 'application',
+        failure: BankingFailure.rejected,
+      );
+    }
+    return _finishedDisconnect(changed, connection, pending);
   }
 
   Future<BankInstitution> _freshReconnectBankInstitution(

@@ -102,24 +102,51 @@ class BankSyncRepository {
     );
   }
 
-  Future<void> markConsentFailure(
+  bool _sameIdentity(BankSyncContext actual, BankSyncContext expected) =>
+      actual.account.id == expected.account.id &&
+      actual.account.ebConnectionId == expected.account.ebConnectionId &&
+      actual.account.ebAccountUid == expected.account.ebAccountUid &&
+      actual.account.identificationHash ==
+          expected.account.identificationHash &&
+      actual.connection.providerId == expected.connection.providerId &&
+      actual.connection.id == expected.connection.id &&
+      actual.connection.applicationId == expected.connection.applicationId &&
+      actual.connection.remoteConnectionId ==
+          expected.connection.remoteConnectionId &&
+      actual.currency == expected.currency &&
+      actual.revision == expected.revision;
+
+  Future<bool> markConsentFailure(
     BankSyncContext expected,
     BankConnectionStatus status,
   ) async {
     final db = await _database;
-    await db.update(
-      'bankConnection',
-      {'status': status.code},
-      where:
-          'id = ? AND providerId = ? AND sessionId = ? AND applicationId = ? AND status = ?',
-      whereArgs: [
-        expected.connection.id,
-        expected.connection.providerId,
-        expected.connection.remoteConnectionId,
-        expected.connection.applicationId,
-        BankConnectionStatus.active.code,
-      ],
-    );
+    if (!const {
+      BankConnectionStatus.expired,
+      BankConnectionStatus.reauthRequired,
+    }.contains(status)) {
+      return false;
+    }
+    return db.transaction((txn) async {
+      BankSyncContext actual;
+      try {
+        actual = await _context(txn, expected.account.id!);
+      } on FormatException {
+        return false;
+      }
+      if (!_sameIdentity(actual, expected) ||
+          expected.connection.status != BankConnectionStatus.active ||
+          actual.connection.status != BankConnectionStatus.active) {
+        return false;
+      }
+      await txn.update(
+        'bankConnection',
+        {'status': status.code},
+        where: 'id = ?',
+        whereArgs: [expected.connection.id],
+      );
+      return true;
+    });
   }
 
   Future<BankSyncSummary> latestResults(int connectionId) async {
@@ -143,9 +170,36 @@ class BankSyncRepository {
     );
   }
 
-  Future<void> recordFailure(BankSyncResult result) async {
+  Future<bool> recordFailure(
+    BankSyncResult result, {
+    BankSyncContext? expected,
+    BankConnectionStatus? markedStatus,
+  }) async {
+    if (expected == null ||
+        expected.account.id != result.accountId ||
+        expected.connection.status != BankConnectionStatus.active) {
+      return false;
+    }
     final db = await _database;
-    await _audit(db, result);
+    return db.transaction((txn) async {
+      BankSyncContext actual;
+      try {
+        actual = await _context(txn, result.accountId);
+      } on FormatException {
+        return false;
+      }
+      final allowedMark = const {
+        BankConnectionStatus.expired,
+        BankConnectionStatus.reauthRequired,
+      }.contains(markedStatus);
+      if (!_sameIdentity(actual, expected) ||
+          (actual.connection.status != BankConnectionStatus.active &&
+              !(allowedMark && actual.connection.status == markedStatus))) {
+        return false;
+      }
+      await _audit(txn, result);
+      return true;
+    });
   }
 
   Future<void> _audit(DatabaseExecutor db, BankSyncResult result) async {
@@ -172,15 +226,7 @@ class BankSyncRepository {
     final accountId = expected.account.id!;
     return db.transaction((txn) async {
       final actual = await _context(txn, accountId);
-      if (actual.connection.providerId != expected.connection.providerId ||
-          actual.connection.id != expected.connection.id ||
-          actual.revision != expected.revision ||
-          actual.currency != expected.currency ||
-          actual.account.ebAccountUid != expected.account.ebAccountUid ||
-          actual.connection.remoteConnectionId !=
-              expected.connection.remoteConnectionId ||
-          actual.connection.applicationId !=
-              expected.connection.applicationId ||
+      if (!_sameIdentity(actual, expected) ||
           actual.connection.status != BankConnectionStatus.active) {
         throw const FormatException('Sync context changed before commit');
       }

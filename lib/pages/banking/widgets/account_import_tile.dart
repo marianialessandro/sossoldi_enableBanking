@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../constants/style.dart';
-import '../../../providers/banking_ui_provider.dart';
 import '../../../services/banking/banking_account.dart';
 import '../../../ui/device.dart';
 import '../../../ui/extensions.dart';
@@ -19,6 +18,7 @@ class AccountImportTile extends ConsumerWidget {
     required this.onSelectedChanged,
     required this.onIconChanged,
     required this.onColorChanged,
+    this.balance = const AsyncData(null),
     super.key,
   });
 
@@ -30,6 +30,7 @@ class AccountImportTile extends ConsumerWidget {
   final ValueChanged<bool> onSelectedChanged;
   final ValueChanged<String> onIconChanged;
   final ValueChanged<int> onColorChanged;
+  final AsyncValue<num?> balance;
 
   /// Keeps the first and last characters only: enough to tell the accounts apart without spelling out the full IBAN.
   static String maskIban(String? iban) {
@@ -40,9 +41,6 @@ class AccountImportTile extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final balance = ref.watch(
-      ebAccountBalanceProvider(account.reference.remoteId),
-    );
     final subtitle = [
       maskIban(account.iban),
       if (account.currency != null) account.currency!,

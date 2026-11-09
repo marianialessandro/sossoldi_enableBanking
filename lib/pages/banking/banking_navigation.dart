@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../providers/banking_ui_provider.dart';
 import '../../ui/snack_bars/snack_bar.dart';
+import 'banking_import_context.dart';
 
 final bankingNavigatorKey = GlobalKey<NavigatorState>();
 final bankingNavigationObserver = BankingNavigationObserver();
@@ -58,20 +59,25 @@ class BankingNavigation extends ConsumerWidget {
           next.connectionId != previous?.connectionId) {
         ref.read(bankCallbackResultProvider.notifier).reset();
         unawaited(
-          ref
-              .read(connectBankFlowProvider.notifier)
-              .resumeImport(connectionId: next.connectionId)
-              .catchError((Object error) {
-                showRootSnackBar(message: bankingErrorMessage(error));
-              }),
+          resumeBankImport(
+            bankingNavigatorKey.currentContext ?? context,
+            ref,
+            connectionId: next.connectionId,
+          ).catchError((Object error) {
+            showRootSnackBar(message: bankingErrorMessage(error));
+          }),
         );
       }
     });
     ref.listen(connectBankFlowProvider, (previous, next) {
-      if (next.connectionId == null) return;
+      if (next.connectionId == null || next.loading) return;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         final navigator = bankingNavigatorKey.currentState;
+        final current = ref.read(connectBankFlowProvider);
         if (navigator == null ||
+            current.connection == null ||
+            current.loading ||
+            !current.connection!.sameLifecycle(next.connection!) ||
             bankingNavigationObserver.contains('/import-accounts')) {
           return;
         }

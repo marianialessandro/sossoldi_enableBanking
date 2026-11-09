@@ -23,6 +23,7 @@ class EnableBankingDataMapper {
     },
     referenceDate: value.referenceDate,
     observedAt: value.lastChangeDateTime,
+    acquiredAt: value.acquiredAt,
     lastCommittedEntryId: value.lastCommittedTransaction,
   );
 

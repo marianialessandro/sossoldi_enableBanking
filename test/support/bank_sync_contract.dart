@@ -13,8 +13,45 @@ import 'package:sqflite/sqflite.dart';
 
 import 'bank_sync_harness.dart';
 
+class _ControlledSyncDeadline extends BankSyncDeadline {
+  Duration _elapsed = Duration.zero;
+  final _expired = Completer<void>();
+  final _pending = <Future<void>>[];
+
+  _ControlledSyncDeadline(super.timeout);
+
+  @override
+  Duration get elapsed => _elapsed;
+
+  void expire() {
+    _elapsed = timeout;
+    _expired.complete();
+  }
+
+  @override
+  Future<T> run<T>(Future<T> Function() action) {
+    if (elapsed >= timeout) throw TimeoutException('Controlled sync deadline');
+    final running = action();
+    _pending.add(
+      running.then<void>((_) {}, onError: (Object _, StackTrace _) {}),
+    );
+    return Future.any([
+      running,
+      _expired.future.then<T>(
+        (_) => throw TimeoutException('Controlled sync deadline'),
+      ),
+    ]);
+  }
+
+  Future<void> drain() => Future.wait(_pending);
+}
+
 /// The same financial contract runs on desktop SQLite and the native iOS plugin.
-void bankSyncContract(DatabaseFactory factory) {
+void bankSyncContract(
+  DatabaseFactory factory, {
+  void Function(String name, Future<void> Function() body)? register,
+}) {
+  final registerCase = register ?? (name, body) => test(name, body);
   late BankSyncHarness h;
 
   setUp(() async {
@@ -23,7 +60,7 @@ void bankSyncContract(DatabaseFactory factory) {
   });
   tearDown(() => h.close());
 
-  test(
+  registerCase(
     'a later server timestamp validates every page before advancing a checkpoint',
     () async {
       await h.service.syncAccount(1);
@@ -51,24 +88,29 @@ void bankSyncContract(DatabaseFactory factory) {
     },
   );
 
-  test('malformed PSU header names cannot reach an account endpoint', () async {
-    h.requiredHeaders = ['PSU-IP-Address\r\nInjected'];
-    final result = await h.service.syncAccount(
-      1,
-      request: const BankSyncRequest(
-        trigger: BankSyncTrigger.manual,
-        psuHeaders: {'PSU-IP-Address\r\nInjected': '127.0.0.1'},
-      ),
-    );
-    expect(result.status, BankSyncStatus.partial);
-    expect(
-      h.requests.where((request) => request.url.path.startsWith('/accounts/')),
-      isEmpty,
-    );
-    expect(await h.transactions(), isEmpty);
-  });
+  registerCase(
+    'malformed PSU header names cannot reach an account endpoint',
+    () async {
+      h.requiredHeaders = ['PSU-IP-Address\r\nInjected'];
+      final result = await h.service.syncAccount(
+        1,
+        request: const BankSyncRequest(
+          trigger: BankSyncTrigger.manual,
+          psuHeaders: {'PSU-IP-Address\r\nInjected': '127.0.0.1'},
+        ),
+      );
+      expect(result.status, BankSyncStatus.partial);
+      expect(
+        h.requests.where(
+          (request) => request.url.path.startsWith('/accounts/'),
+        ),
+        isEmpty,
+      );
+      expect(await h.transactions(), isEmpty);
+    },
+  );
 
-  test(
+  registerCase(
     'initial import reconciles 305.89 - 73.14 = 232.75 exactly and re-sync is idempotent',
     () async {
       final result = await h.service.syncAccount(1);
@@ -97,7 +139,7 @@ void bankSyncContract(DatabaseFactory factory) {
     },
   );
 
-  test(
+  registerCase(
     'corrections, cancellation and rebooking preserve explicit local edits',
     () async {
       await h.service.syncAccount(1);
@@ -139,7 +181,7 @@ void bankSyncContract(DatabaseFactory factory) {
     },
   );
 
-  test(
+  registerCase(
     'pending becomes booked and explicit local deletion remains suppressed',
     () async {
       await h.service.syncAccount(1);
@@ -163,7 +205,7 @@ void bankSyncContract(DatabaseFactory factory) {
     },
   );
 
-  test(
+  registerCase(
     'page order, page size and transient ID collisions do not change identity',
     () async {
       h.pages = [
@@ -184,7 +226,7 @@ void bankSyncContract(DatabaseFactory factory) {
     },
   );
 
-  test(
+  registerCase(
     'ambiguous duplicate fingerprints or references abort the whole batch',
     () async {
       for (final reference in <String?>[null, 'duplicate']) {
@@ -201,7 +243,7 @@ void bankSyncContract(DatabaseFactory factory) {
     },
   );
 
-  test(
+  registerCase(
     'fallback identity survives changed IDs but ambiguous corrections remain retryable by the user',
     () async {
       h.pages = [
@@ -223,7 +265,7 @@ void bankSyncContract(DatabaseFactory factory) {
     },
   );
 
-  test(
+  registerCase(
     'invalid records do not commit valid siblings or advance checkpoints',
     () async {
       await h.service.syncAccount(1);
@@ -251,7 +293,7 @@ void bankSyncContract(DatabaseFactory factory) {
     },
   );
 
-  test(
+  registerCase(
     'foreign account and transaction currencies never enter global totals',
     () async {
       h.bankCurrency = 'USD';
@@ -269,8 +311,144 @@ void bankSyncContract(DatabaseFactory factory) {
     },
   );
 
+  registerCase(
+    'A06 invalid second page preserves the initialized exact ledger',
+    () async {
+      expect((await h.service.syncAccount(1)).completed, isTrue);
+      final state = await h.state();
+      final rows = await h.transactions();
+      final ledger = await h.db.query('bankRemoteTransaction');
+      h.pages = [
+        [bankRecord(amount: '70.00')],
+        [bankRecord(reference: 'bad', date: '2026-02-29')],
+      ];
+      expect((await h.service.syncAccount(1)).completed, isFalse);
+      expect(await h.state(), state);
+      expect(await h.transactions(), rows);
+      expect(await h.db.query('bankRemoteTransaction'), ledger);
+    },
+  );
+
+  registerCase(
+    'A07 an absent stable reference is never an implicit cancellation',
+    () async {
+      expect((await h.service.syncAccount(1)).completed, isTrue);
+      final rows = await h.transactions();
+      final ledger = await h.db.query('bankRemoteTransaction');
+      h.pages = [[]];
+      await h.service.syncAccount(1);
+      expect(await h.transactions(), rows);
+      expect(await h.db.query('bankRemoteTransaction'), ledger);
+    },
+  );
+
+  registerCase(
+    'A08 equal remote IDs remain isolated across accounts and connections',
+    () async {
+      await h.addAccount(2);
+      final connection = Map<String, Object?>.of(
+        (await h.db.query('bankConnection')).single,
+      )..addAll({'id': 2, 'sessionId': 'independent-session'});
+      await h.db.insert('bankConnection', connection);
+      await h.db.update('bankAccount', {
+        'ebConnectionId': 2,
+        'ebAccountUid': 'synthetic-uid-1',
+      }, where: 'id = 2');
+      expect(
+        (await h.service.syncConnection(1)).status,
+        BankSyncStatus.success,
+      );
+      final first = await h.db.query(
+        'bankRemoteTransaction',
+        where: 'accountId = 1',
+      );
+      expect(
+        (await h.service.syncConnection(2)).status,
+        BankSyncStatus.success,
+      );
+      expect(
+        await h.db.query('bankRemoteTransaction', where: 'accountId = 1'),
+        first,
+      );
+      final ledger = await h.db.query(
+        'bankRemoteTransaction',
+        orderBy: 'accountId',
+      );
+      expect(ledger.map((row) => row['accountId']), [1, 2]);
+      expect(ledger.map((row) => row['entryReference']).toSet(), {'ref-1'});
+      expect(await h.transactions(), hasLength(2));
+      expect(
+        (await h.db.query(
+          'bankSyncState',
+        )).map((row) => row['accountId']).toSet(),
+        {1, 2},
+      );
+    },
+  );
+
+  registerCase(
+    'A26 a 100 record budget rejects 101 records without partial writes',
+    () async {
+      h.resetService(limits: const BankSyncLimits(records: 100));
+      h.pages = [
+        [for (var i = 0; i < 101; i++) bankRecord(reference: 'r$i')],
+      ];
+      expect(
+        (await h.service.syncAccount(1)).warnings,
+        contains('record_limit'),
+      );
+      expect(await h.transactions(), isEmpty);
+      expect(await h.db.query('bankRemoteTransaction'), isEmpty);
+      expect(await h.db.query('bankSyncState'), isEmpty);
+    },
+  );
+
+  registerCase(
+    'A27 malformed first account cannot stop the second account sync',
+    () async {
+      await h.addAccount(2);
+      h.intercept = (request) async =>
+          request.url.path.contains('synthetic-uid-1/') &&
+              request.url.path.endsWith('/transactions')
+          ? h.response({
+              'transactions': [bankRecord(amount: 'NaN')],
+            })
+          : null;
+      final result = await h.service.syncConnection(1);
+      expect(result.status, BankSyncStatus.partial);
+      expect(
+        result.accounts.firstWhere((item) => item.accountId == 1).completed,
+        isFalse,
+      );
+      expect(
+        result.accounts.firstWhere((item) => item.accountId == 2).completed,
+        isTrue,
+      );
+      expect(
+        (await h.db.query('bankRemoteTransaction')).single['accountId'],
+        2,
+      );
+      expect((await h.transactions()).single['idBankAccount'], 2);
+    },
+  );
+
+  registerCase(
+    'A28 unanchored fallback cannot invent an opening balance',
+    () async {
+      h.pages = [
+        [bankRecord(reference: null)],
+      ];
+      h.balance = '0.00';
+      h.balanceMarker = null;
+      expect((await h.service.syncAccount(1)).completed, isFalse);
+      expect(await h.transactions(), isEmpty);
+      expect(await h.db.query('bankRemoteTransaction'), isEmpty);
+      expect(await h.db.query('bankSyncState'), isEmpty);
+    },
+  );
+
   for (final currency in ['USD', 'GBP', 'CHF']) {
-    test(
+    registerCase(
       'uses the selected $currency as the global unit without EUR assumptions',
       () async {
         await h.db.transaction((txn) async {
@@ -293,7 +471,7 @@ void bankSyncContract(DatabaseFactory factory) {
     );
   }
 
-  test(
+  registerCase(
     'global currency and bank-owned values cannot silently be relabeled or edited',
     () async {
       await h.service.syncAccount(1);
@@ -327,7 +505,7 @@ void bankSyncContract(DatabaseFactory factory) {
     },
   );
 
-  test(
+  registerCase(
     'stale, available, unanchored and expected balances cannot initialize an account',
     () async {
       for (final type in ['CLAV', 'ITAV', 'XPCD', 'UNKNOWN']) {
@@ -350,7 +528,7 @@ void bankSyncContract(DatabaseFactory factory) {
     'bankSyncState',
     'bankSyncAudit',
   ]) {
-    test(
+    registerCase(
       'SQLite failure at $target rolls back financial data and checkpoints',
       () async {
         await h.db.execute(
@@ -372,7 +550,7 @@ void bankSyncContract(DatabaseFactory factory) {
     );
   }
 
-  test(
+  registerCase(
     'a network error after pagination leaves the previous batch intact',
     () async {
       await h.service.syncAccount(1);
@@ -393,7 +571,7 @@ void bankSyncContract(DatabaseFactory factory) {
     },
   );
 
-  test('429 honors Retry-After and retry count is bounded', () async {
+  registerCase('429 honors Retry-After and retry count is bounded', () async {
     var calls = 0;
     h.intercept = (request) async {
       if (!request.url.path.endsWith('/transactions')) return null;
@@ -411,29 +589,32 @@ void bankSyncContract(DatabaseFactory factory) {
     expect(calls, 2);
   });
 
-  test('absolute Retry-After uses server time, not the local clock', () async {
-    var calls = 0;
-    h.localTime = DateTime.utc(2040);
-    h.intercept = (request) async {
-      if (!request.url.path.endsWith('/transactions')) return null;
-      calls++;
-      return calls == 1
-          ? h.response(
-              {'error': 'ASPSP_RATE_LIMIT_EXCEEDED'},
-              status: 429,
-              headers: {
-                'retry-after': HttpDate.format(
-                  h.serverTime.add(const Duration(seconds: 3)),
-                ),
-              },
-            )
-          : null;
-    };
-    expect((await h.service.syncAccount(1)).completed, isTrue);
-    expect(h.sleeps, [const Duration(seconds: 3)]);
-  });
+  registerCase(
+    'absolute Retry-After uses server time, not the local clock',
+    () async {
+      var calls = 0;
+      h.localTime = DateTime.utc(2040);
+      h.intercept = (request) async {
+        if (!request.url.path.endsWith('/transactions')) return null;
+        calls++;
+        return calls == 1
+            ? h.response(
+                {'error': 'ASPSP_RATE_LIMIT_EXCEEDED'},
+                status: 429,
+                headers: {
+                  'retry-after': HttpDate.format(
+                    h.serverTime.add(const Duration(seconds: 3)),
+                  ),
+                },
+              )
+            : null;
+      };
+      expect((await h.service.syncAccount(1)).completed, isTrue);
+      expect(h.sleeps, [const Duration(seconds: 3)]);
+    },
+  );
 
-  test('malformed Retry-After falls back to bounded backoff', () async {
+  registerCase('malformed Retry-After falls back to bounded backoff', () async {
     var calls = 0;
     h.intercept = (request) async {
       if (!request.url.path.endsWith('/transactions')) return null;
@@ -451,7 +632,7 @@ void bankSyncContract(DatabaseFactory factory) {
     expect(h.sleeps, hasLength(1));
   });
 
-  test(
+  registerCase(
     'absolute Retry-After without server time does not retry early',
     () async {
       h.intercept = (request) async {
@@ -477,7 +658,7 @@ void bankSyncContract(DatabaseFactory factory) {
     },
   );
 
-  test(
+  registerCase(
     'continuation cycles, page caps and record caps cannot commit incomplete feeds',
     () async {
       h.cycle = true;
@@ -501,7 +682,7 @@ void bankSyncContract(DatabaseFactory factory) {
     },
   );
 
-  test(
+  registerCase(
     'history fallback is explicit and does not invent a 90 day cutoff',
     () async {
       h.intercept = (request) async =>
@@ -524,7 +705,7 @@ void bankSyncContract(DatabaseFactory factory) {
     },
   );
 
-  test(
+  registerCase(
     'manual PSU headers are complete and background headers are absent',
     () async {
       h.requiredHeaders = ['Psu-Ip-Address', 'Psu-User-Agent'];
@@ -564,7 +745,7 @@ void bankSyncContract(DatabaseFactory factory) {
     },
   );
 
-  test(
+  registerCase(
     'concurrent triggers coalesce and reconnect retains stable local identity',
     () async {
       final results = await Future.wait([
@@ -590,7 +771,7 @@ void bankSyncContract(DatabaseFactory factory) {
     },
   );
 
-  test('disconnect during fetch invalidates the commit', () async {
+  registerCase('disconnect during fetch invalidates the commit', () async {
     h.intercept = (request) async {
       if (request.url.path.endsWith('/balances')) {
         await h.db.update('bankConnection', {
@@ -603,7 +784,7 @@ void bankSyncContract(DatabaseFactory factory) {
     expect(await h.transactions(), isEmpty);
   });
 
-  test(
+  registerCase(
     'completed disconnect keeps imported history as editable manual transactions',
     () async {
       await h.service.syncAccount(1);
@@ -617,7 +798,7 @@ void bankSyncContract(DatabaseFactory factory) {
     },
   );
 
-  test(
+  registerCase(
     'database clear removes exact ledger and checkpoints with the original data',
     () async {
       await h.service.syncAccount(1);
@@ -634,7 +815,7 @@ void bankSyncContract(DatabaseFactory factory) {
     },
   );
 
-  test(
+  registerCase(
     'database reset recreates the complete schema without obsolete sync guards',
     () async {
       await h.service.syncAccount(1);
@@ -651,7 +832,7 @@ void bankSyncContract(DatabaseFactory factory) {
     },
   );
 
-  test(
+  registerCase(
     'mixed account outcomes are partial and total failure cannot look like zero changes',
     () async {
       await h.addAccount(2);
@@ -673,7 +854,7 @@ void bankSyncContract(DatabaseFactory factory) {
     },
   );
 
-  test(
+  registerCase(
     'local clock changes do not move the remote transaction checkpoint',
     () async {
       h.localTime = DateTime.utc(2040);
@@ -686,7 +867,7 @@ void bankSyncContract(DatabaseFactory factory) {
     },
   );
 
-  test(
+  registerCase(
     'manual and background throttles are independent and use monotonic elapsed time',
     () async {
       h.resetService(limits: const BankSyncLimits());
@@ -710,7 +891,7 @@ void bankSyncContract(DatabaseFactory factory) {
     },
   );
 
-  test(
+  registerCase(
     'database reopen preserves ledger, local edits and deduplication',
     () async {
       await h.service.syncAccount(1);
@@ -726,7 +907,7 @@ void bankSyncContract(DatabaseFactory factory) {
     },
   );
 
-  test(
+  registerCase(
     'zero-decimal currency works while three-decimal UI import is explicitly refused',
     () async {
       await h.db.update('currency', {'mainCurrency': 0});
@@ -746,7 +927,7 @@ void bankSyncContract(DatabaseFactory factory) {
     },
   );
 
-  test(
+  registerCase(
     'three-decimal and XXX global currencies cannot silently lose precision',
     () async {
       await h.db.update('currency', {'mainCurrency': 0});
@@ -771,24 +952,49 @@ void bankSyncContract(DatabaseFactory factory) {
     },
   );
 
-  test(
+  registerCase(
     'a total deadline and a Retry-After beyond the budget do not start more requests',
     () async {
-      h.resetService(
-        limits: const BankSyncLimits(timeout: Duration(milliseconds: 20)),
-      );
+      final deadline = _ControlledSyncDeadline(const Duration(minutes: 3));
+      h.resetService(deadline: (_) => deadline);
+      final entered = Completer<void>();
+      final release = Completer<void>();
+      final state = await h.db.query('bankSyncState');
+      final accounts = await h.db.query('bankAccount');
       h.intercept = (request) async {
-        await Future<void>.delayed(const Duration(milliseconds: 50));
+        if (request.url.path.endsWith('/transactions')) {
+          entered.complete();
+          await release.future;
+        }
         return null;
       };
-      expect(
-        (await h.service.syncAccount(1)).warnings,
-        contains('operation_timeout'),
-      );
-      await Future<void>.delayed(const Duration(milliseconds: 60));
+      final running = h.service.syncAccount(1);
+      try {
+        await entered.future;
+        final requestsAtExpiry = h.requests.length;
+        expect(h.requests.last.url.path, endsWith('/transactions'));
+        deadline.expire();
+        final result = await running;
+        expect(result.warnings, contains('operation_timeout'));
+        expect(await h.db.query('bankSyncState'), state);
+        expect(await h.db.query('bankAccount'), accounts);
+        expect(await h.transactions(), isEmpty);
+        expect(await h.db.query('bankRemoteTransaction'), isEmpty);
+        release.complete();
+        await deadline.drain();
+        expect(h.requests, hasLength(requestsAtExpiry));
+        expect(await h.db.query('bankSyncState'), state);
+        expect(await h.db.query('bankAccount'), accounts);
+        expect(await h.transactions(), isEmpty);
+        expect(await h.db.query('bankRemoteTransaction'), isEmpty);
+      } finally {
+        if (!release.isCompleted) release.complete();
+        await deadline.drain();
+      }
       h.requests.clear();
       h.resetService(
         limits: const BankSyncLimits(timeout: Duration(seconds: 1)),
+        deadline: _ControlledSyncDeadline.new,
       );
       h.intercept = (request) async => h.response(
         {'error': 'ASPSP_RATE_LIMIT_EXCEEDED'},
@@ -802,24 +1008,30 @@ void bankSyncContract(DatabaseFactory factory) {
       expect(h.requests, hasLength(1));
       expect(h.sleeps, isEmpty);
       expect(await h.transactions(), isEmpty);
+      expect(await h.db.query('bankRemoteTransaction'), isEmpty);
+      expect(await h.db.query('bankSyncState'), state);
+      expect(await h.db.query('bankAccount'), accounts);
     },
   );
 
-  test('missing server time never advances a financial checkpoint', () async {
-    h.intercept = (request) async {
-      if (!request.url.path.endsWith('/transactions')) return null;
-      return h.response(
-        {
-          'transactions': [bankRecord()],
-        },
-        headers: {'date': 'invalid'},
-      );
-    };
-    expect((await h.service.syncAccount(1)).completed, isFalse);
-    expect(await h.db.query('bankSyncState'), isEmpty);
-  });
+  registerCase(
+    'missing server time never advances a financial checkpoint',
+    () async {
+      h.intercept = (request) async {
+        if (!request.url.path.endsWith('/transactions')) return null;
+        return h.response(
+          {
+            'transactions': [bankRecord()],
+          },
+          headers: {'date': 'invalid'},
+        );
+      };
+      expect((await h.service.syncAccount(1)).completed, isFalse);
+      expect(await h.db.query('bankSyncState'), isEmpty);
+    },
+  );
 
-  test(
+  registerCase(
     'startup and resume retry after days, with no duplicate observer requests',
     () async {
       h.resetService();
@@ -855,7 +1067,7 @@ void bankSyncContract(DatabaseFactory factory) {
     },
   );
 
-  test(
+  registerCase(
     'v8 upgrade preserves manual data and creates the exact bank ledger',
     () async {
       final path = '${h.path}.v8';

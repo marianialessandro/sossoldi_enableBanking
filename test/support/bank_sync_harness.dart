@@ -76,16 +76,24 @@ class BankSyncHarness {
   Future<http.Response?> Function(http.Request)? intercept;
   bool cycle = false;
 
-  BankSyncHarness(this.factory);
+  final Duration consentDuration;
+  DateTime? validUntil;
 
-  Future<void> open() async {
+  BankSyncHarness(
+    this.factory, {
+    this.consentDuration = const Duration(days: 120),
+    this.validUntil,
+  });
+
+  Future<void> open({int? schemaVersion}) async {
     path =
         '${await factory.getDatabasesPath()}/bank_sync_contract_${DateTime.now().microsecondsSinceEpoch}.db';
     final manager = MigrationManager();
+    validUntil ??= serverTime.add(consentDuration);
     db = await factory.openDatabase(
       path,
       options: OpenDatabaseOptions(
-        version: manager.latestVersion,
+        version: schemaVersion ?? manager.latestVersion,
         onCreate: (db, version) => manager.migrate(db, 0, version),
       ),
     );
@@ -97,7 +105,7 @@ class BankSyncHarness {
       'applicationId': 'synthetic-app',
       'sessionId': 'synthetic-session',
       'status': 'ACTIVE',
-      'validUntil': '2027-01-01T00:00:00.000Z',
+      'validUntil': validUntil!.toIso8601String(),
       'createdAt': serverTime.toIso8601String(),
       'updatedAt': serverTime.toIso8601String(),
     });
@@ -131,6 +139,7 @@ class BankSyncHarness {
       .then((_) {});
 
   void resetService({
+    BankSyncDeadline Function(Duration)? deadline,
     BankSyncLimits limits = const BankSyncLimits(
       manualInterval: Duration.zero,
       backgroundInterval: Duration.zero,
@@ -156,6 +165,7 @@ class BankSyncHarness {
         );
       },
       limits: limits,
+      deadline: deadline,
       clock: () => localTime,
       elapsed: () => elapsed,
       jitter: () => 0,
@@ -200,8 +210,10 @@ class BankSyncHarness {
         'status': 'AUTHORIZED',
         'aspsp': {'name': 'Synthetic Bank', 'country': 'IT'},
         'psu_type': 'personal',
-        'access': {'valid_until': DateTime.utc(2027, 1, 1).toIso8601String()},
-        'created': DateTime.utc(2026, 9, 1).toIso8601String(),
+        'access': {'valid_until': validUntil!.toIso8601String()},
+        'created': serverTime
+            .subtract(const Duration(days: 1))
+            .toIso8601String(),
         'accounts': ['synthetic-uid-1', 'synthetic-uid-2'],
       });
     }

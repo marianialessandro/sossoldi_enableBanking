@@ -1,4 +1,8 @@
 import 'dart:async';
+import 'dart:convert';
+import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -10,6 +14,23 @@ import 'package:sossoldi/services/banking/enable_banking/models/eb_application.d
 import 'package:sossoldi/services/database/migration_manager.dart';
 import 'package:sossoldi/services/database/repositories/bank_connection_repository.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+import '../services/banking/enable_banking_auth_test.dart'
+    show testPrivateKeyPem;
+
+class _DelayedContextStore extends EnableBankingCredentialsStore {
+  final entered = Completer<void>();
+  final release = Completer<void>();
+  var delay = false;
+  @override
+  Future<EnableBankingCredentials?> readCredentials() async {
+    final result = await super.readCredentials();
+    if (delay && !entered.isCompleted) {
+      entered.complete();
+      await release.future;
+    }
+    return result;
+  }
+}
 
 class _ApplicationApi extends EnableBankingApi {
   _ApplicationApi()
@@ -135,6 +156,104 @@ void main() {
           defaultCountry: 'it',
         ),
       );
+
+  test(
+    'A32 Settings Clear invalidates cached JWT on a previously obtained API; B recovers',
+    () async {
+      await store.saveCredentials(
+        appId: 'A',
+        privateKeyPem: testPrivateKeyPem,
+        config: const EnableBankingConfig(appId: 'A'),
+      );
+      final kids = <String>[];
+      final oldApi = EnableBankingApi(
+        auth: container.read(enableBankingAuthProvider),
+        store: store,
+        client: MockClient((request) async {
+          final kid =
+              JWT
+                      .decode(request.headers['Authorization']!.substring(7))
+                      .header!['kid']
+                  as String;
+          kids.add(kid);
+          return http.Response(
+            jsonEncode({
+              'kid': kid,
+              'name': 'Synthetic',
+              'environment': 'PRODUCTION',
+              'active': true,
+              'services': ['AIS'],
+              'countries': ['IT'],
+              'redirect_urls': [kEbRedirectUri],
+            }),
+            200,
+          );
+        }),
+      );
+      await oldApi.getApplication();
+      await container.read(enableBankingSettingsProvider.notifier).clear();
+      await expectLater(oldApi.getApplication(), throwsA(anything));
+      expect(kids, ['A']);
+      expect(
+        container.read(enableBankingSettingsProvider).requireValue,
+        isNull,
+      );
+      await store.saveCredentials(
+        appId: 'B',
+        privateKeyPem: testPrivateKeyPem,
+        config: const EnableBankingConfig(appId: 'B'),
+      );
+      await oldApi.getApplication();
+      expect(kids, ['A', 'B']);
+    },
+  );
+
+  test(
+    'context read begun before Settings Clear cannot recreate A after B',
+    () async {
+      final delayed = _DelayedContextStore();
+      await delayed.saveCredentials(
+        appId: 'A',
+        privateKeyPem: testPrivateKeyPem,
+        config: const EnableBankingConfig(
+          appId: 'A',
+          redirectUrls: [kEbRedirectUri],
+        ),
+      );
+      container.dispose();
+      container = ProviderContainer(
+        overrides: [
+          enableBankingCredentialsStoreProvider.overrideWithValue(delayed),
+          enableBankingApiProvider.overrideWithValue(api),
+          bankConnectionRepositoryProvider.overrideWithValue(connections),
+        ],
+      );
+      await container.read(enableBankingSettingsProvider.future);
+      delayed.delay = true;
+      final context = readEnableBankingAuthorizationContext(delayed);
+      final rejected = expectLater(context, throwsA(anything));
+      await delayed.entered.future;
+      await container.read(enableBankingSettingsProvider.notifier).clear();
+      await delayed.saveCredentials(
+        appId: 'B',
+        privateKeyPem: testPrivateKeyPem,
+        config: const EnableBankingConfig(
+          appId: 'B',
+          redirectUrls: [kEbRedirectUri],
+        ),
+      );
+      delayed.release.complete();
+      await rejected;
+      expect(
+        (await readEnableBankingAuthorizationContext(delayed)).applicationId,
+        'B',
+      );
+      expect(
+        container.read(enableBankingSettingsProvider).requireValue,
+        isNull,
+      );
+    },
+  );
 
   test(
     'late verification cannot overwrite a completed clear or its UI state',
